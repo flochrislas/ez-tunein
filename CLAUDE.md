@@ -18,6 +18,17 @@ It plays Icecast/Shoutcast streams (SomaFM, SwissGroove, …), shows the live
 - `doc/tech-stack.md` — why Flutter/just_audio was chosen + the metadata caveat.
 - `README.md` — setup/run/install steps.
 
+## Version control
+
+This is a git repo, public on GitHub at **https://github.com/flochrislas/ez-tunein**
+(`origin`, default branch `main`). Licensed **GPL-3.0** (`LICENSE`).
+
+- Commits use a **repo-local** identity (`git config --local`) with a GitHub
+  noreply email — do not change it to the global/work identity, and don't expose
+  a real email in commit history.
+- `git log` is now part of the project's history — use it for context on past changes.
+- Commit/push only when asked (per the usual workflow rules).
+
 ## Layout
 
 - **`lib/main.dart`** — the entire app lives here (intentionally single-file; keep it that way unless it grows substantially).
