@@ -504,8 +504,9 @@ Future<File> savedTracksFile() async {
 /// One saved track. [timestamp] is kept as the raw ISO-8601 string (which sorts
 /// chronologically as plain text).
 class SavedTrack {
-  SavedTrack(this.timestamp, this.artist, this.title);
+  SavedTrack(this.timestamp, this.station, this.artist, this.title);
   final String timestamp;
+  final String station;
   final String artist;
   final String title;
 }
@@ -538,7 +539,7 @@ class _SavedTracksPageState extends State<SavedTracksPage> {
       // Row 0 is the header (timestamp,station,artist,title,album,raw); skip it.
       for (final r in rows.skip(1)) {
         if (r.length < 4) continue;
-        tracks.add(SavedTrack(r[0], r[2], r[3]));
+        tracks.add(SavedTrack(r[0], r[1], r[2], r[3]));
       }
     }
     if (!mounted) return;
@@ -556,8 +557,10 @@ class _SavedTracksPageState extends State<SavedTracksPage> {
         final int r;
         switch (columnIndex) {
           case 1:
-            r = a.artist.toLowerCase().compareTo(b.artist.toLowerCase());
+            r = a.station.toLowerCase().compareTo(b.station.toLowerCase());
           case 2:
+            r = a.artist.toLowerCase().compareTo(b.artist.toLowerCase());
+          case 3:
             r = a.title.toLowerCase().compareTo(b.title.toLowerCase());
           default:
             r = a.timestamp.compareTo(b.timestamp);
@@ -641,6 +644,10 @@ class _SavedTracksPageState extends State<SavedTracksPage> {
                             onSort: _onSort,
                           ),
                           DataColumn(
+                            label: const Text('Radio station'),
+                            onSort: _onSort,
+                          ),
+                          DataColumn(
                             label: const Text('Artist'),
                             onSort: _onSort,
                           ),
@@ -655,6 +662,7 @@ class _SavedTracksPageState extends State<SavedTracksPage> {
                               onSelectChanged: (_) => _copy(t),
                               cells: [
                                 DataCell(Text(_fmtDateTime(t.timestamp))),
+                                DataCell(Text(t.station)),
                                 DataCell(Text(t.artist)),
                                 DataCell(Text(t.title)),
                               ],
