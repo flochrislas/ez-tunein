@@ -33,7 +33,7 @@ void main() async {
     final h = prefs.getDouble(_winHeightKey);
     await windowManager.waitUntilReadyToShow(
       WindowOptions(
-        size: (w != null && h != null) ? Size(w, h) : const Size(1280, 720),
+        size: (w != null && h != null) ? Size(w, h) : const Size(640, 720),
         minimumSize: const Size(420, 480),
         title: 'EZ-TuneIn Radio',
       ),
