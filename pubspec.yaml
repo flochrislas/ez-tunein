@@ -1,0 +1,28 @@
+name: radio
+description: Minimalist internet radio player that saves the current track to a CSV file.
+publish_to: 'none'
+version: 0.1.0
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # Playback (Android/iOS use native; desktop uses the media_kit backend below)
+  just_audio: ^0.9.42
+  # Desktop (Windows/Linux/macOS) playback backend for just_audio, wraps libmpv
+  just_audio_media_kit: ^2.0.6
+  media_kit_libs_audio: ^1.0.5
+  # Where to write the saved-tracks CSV
+  path_provider: ^2.1.5
+  # Persists the volume setting between launches
+  shared_preferences: ^2.3.2
+  # Desktop (Windows/Linux/macOS) window sizing + persistence
+  window_manager: ^0.4.3
+
+dev_dependencies:
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
