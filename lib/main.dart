@@ -286,11 +286,6 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
               MaterialPageRoute<void>(builder: (_) => const SavedTracksPage()),
             ),
           ),
-          IconButton(
-            icon: const Icon(Icons.add),
-            tooltip: 'Add station',
-            onPressed: _addStation,
-          ),
         ],
       ),
       body: Padding(
@@ -364,8 +359,27 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
             const Divider(),
             Expanded(
               child: ListView.builder(
-                itemCount: _stations.length,
+                itemCount: _stations.length + 1,
                 itemBuilder: (context, i) {
+                  // Last row: the "add a station" affordance, shown dimmer than
+                  // the real stations to read as an action rather than an entry.
+                  if (i == _stations.length) {
+                    final muted = Theme.of(context)
+                        .colorScheme
+                        .onSurfaceVariant
+                        .withValues(alpha: 0.55);
+                    return ListTile(
+                      leading: Icon(Icons.add, color: muted),
+                      title: Text(
+                        'Add a new radio station…',
+                        style: TextStyle(
+                          color: muted,
+                          fontStyle: FontStyle.italic,
+                        ),
+                      ),
+                      onTap: _addStation,
+                    );
+                  }
                   final s = _stations[i];
                   return _StationTile(
                     station: s,
