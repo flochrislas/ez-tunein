@@ -135,7 +135,10 @@ regardless of whether metadata succeeds (it's best-effort and swallows errors).
 - No URL validation beyond non-empty; a bad URL surfaces as a "Could not play"
   snackbar.
 - Saved-tracks view is a snapshot (no live refresh while open).
-- The internal Flutter package name is still `radio` (binary name, Android app
-  id `com.example.radio`) — rename deliberately before shipping.
+- The application ID is `io.github.flochrislas.eztunein` (Android `applicationId`
+  + `namespace`, and the Linux GTK `APPLICATION_ID` — which determines the
+  `shared_preferences` directory). The internal Flutter **package** name is still
+  `radio` (the Dart package + the on-disk binary name); renaming that is more
+  invasive and hasn't been done.
 - `album` column is always blank for ICY sources; a per-station JSON API (e.g.
   SomaFM's) could fill it in.

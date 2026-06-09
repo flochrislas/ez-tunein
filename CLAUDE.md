@@ -102,4 +102,5 @@ approach.
 
 - Android build (SDK, cleartext-HTTP manifest flag, CSV location rethink).
 - Edit/reorder stations; URL validation; live-refresh of the saved-tracks view.
-- Rename the internal package/bundle id from `radio` / `com.example.radio`.
+- Rename the internal Dart package / binary name (still `radio`). The application
+  ID is already `io.github.flochrislas.eztunein` (Android + Linux GTK).

@@ -58,6 +58,13 @@ Platform-specific setup is below.
    flutter run -d linux
    ```
 
+**Where settings are stored:** your volume, station list, and window size live in:
+```
+~/.local/share/io.github.flochrislas.eztunein/shared_preferences.json
+```
+Delete that file (or individual keys like `win_w` / `win_h`) to reset to
+defaults — e.g. to get a true "first run" window size again.
+
 ### Windows 11
 
 1. **Git for Windows** — https://git-scm.com (Flutter uses it under the hood).

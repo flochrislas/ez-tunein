@@ -1,4 +1,4 @@
-package com.example.radio
+package io.github.flochrislas.eztunein
 
 import io.flutter.embedding.android.FlutterActivity
 
