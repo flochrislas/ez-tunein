@@ -114,9 +114,14 @@ The lesson: never `await` `just_audio.play()` for a live/endless source.
 The CSV (`radio_saved_tracks.csv`) is written to the app's documents directory
 via `getApplicationDocumentsDirectory()`. On desktop that's the user's real
 **Documents** folder; on Android it's an **app-private** directory that isn't
-browsable from a file manager. Saving and viewing tracks **works** (verified),
-but the file isn't easy to get off the device — a share/export action is a
-sensible future enhancement.
+browsable from a file manager.
+
+To get the file **off the device**, the saved-tracks view has a **Share** action
+(`_export`, via the `share_plus` package). On mobile it opens the OS share sheet
+— email, Quick Share to a PC, Drive, "Save to Files", etc. On desktop (where the
+file is already in Documents) the same button instead copies the path and offers
+to open the containing folder, since `share_plus` doesn't support file sharing on
+Linux. Saving, viewing, and sharing tracks are all verified on Android and Linux.
 
 ## Not done yet (Android)
 
@@ -124,6 +129,5 @@ sensible future enhancement.
   build with the **debug** keys (`// TODO: Add your own signing config`). Fine for
   testing; a real keystore is needed before publishing to Play / distributing a
   release APK.
-- **Export/share** for the saved-tracks CSV (see above).
 - **App label** is still `radio` (manifest `android:label`); the public name is
   EZ-TuneIn.

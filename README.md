@@ -17,6 +17,9 @@ Runs on **Windows**, **Linux**, and **Android**.
   **date · radio station · artist · title**. Click a column header to sort by it,
   click a row to copy `Artist - Title` to your clipboard, or wipe the list with
   **Clear all**.
+- **Export your list** — on mobile, **Share** the saved-tracks CSV via the system
+  share sheet (email it to yourself, send it to your PC, save to Drive…); on
+  desktop the file's already in your Documents folder and the button reveals it.
 - **Manage your stations** — add a station with the **+** button, or hover a
   station and click the trash icon to remove it. Your list is remembered between
   launches.

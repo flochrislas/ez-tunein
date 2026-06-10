@@ -24,6 +24,7 @@ A minimalist internet-radio player:
 - **Persistence:** `shared_preferences` (volume, station list, window size) and a
   plain CSV file (saved tracks).
 - **Window sizing:** `window_manager` (desktop only).
+- **Export:** `share_plus` (OS share sheet for the saved-tracks CSV on mobile).
 
 Everything lives in a single file, **`lib/main.dart`** — the app is small enough
 that splitting it would add more ceremony than clarity.
@@ -75,7 +76,7 @@ regardless of whether metadata succeeds (it's best-effort and swallows errors).
 | `PlayerPage` / `_PlayerPageState` | The main screen. Owns the `AudioPlayer`, the `IcyReader`, the station list, volume, and (via `WindowListener`) window-resize persistence. |
 | `_StationTile` | A station row that reveals its delete button only on hover (`MouseRegion`). |
 | `_AddStationDialog` | Minimal name + URL dialog; returns a `Station`. |
-| `SavedTracksPage` / `SavedTrack` | The saved-tracks table screen. |
+| `SavedTracksPage` / `SavedTrack` | The saved-tracks table screen. Its `_export` shares the CSV (share sheet on mobile, reveal-in-folder on desktop). |
 | `IcyReader` | The ICY metadata reader described above. |
 | `savedTracksFile()` | Resolves the CSV path (shared by writer and reader). |
 | `_parseCsv` / `_csvField` | RFC-4180 CSV read/write (no dependency). |
@@ -91,8 +92,8 @@ regardless of whether metadata succeeds (it's best-effort and swallows errors).
   with header `timestamp,station,artist,title,album,raw`.
   - On Linux/Windows this is the user's real **Documents** folder.
   - On Android it's an app-private directory (not browsable from a file manager).
-    Saving and viewing tracks works; getting the file *off* the device would
-    need a share/export action (see [`android-build.md`](./android-build.md)).
+    The saved-tracks view's **Share** action (`_export`) gets the file off the
+    device — see [Export / share](#export--share-the-csv) below.
   - `album` is effectively always empty: ICY streams don't carry it. `raw` keeps
     the full original `StreamTitle` as a fallback.
 
@@ -124,6 +125,20 @@ regardless of whether metadata succeeds (it's best-effort and swallows errors).
   (date sorts on the raw ISO string; artist/title case-insensitive). Row tap
   copies `"artist - title"` to the clipboard. Clear-all confirms, then truncates
   the file back to just the header.
+
+### Export / share the CSV
+
+`_export()` (saved-tracks view) is **platform-adaptive**:
+
+- **Mobile (Android/iOS):** hands the CSV to the OS share sheet via `share_plus`
+  (`SharePlus.instance.share` with an `XFile`) — email, Quick Share, Drive, "Save
+  to Files", etc.
+- **Desktop (Linux/Windows/macOS):** the file is already in the user's Documents
+  folder, so instead it copies the path to the clipboard and offers an **Open
+  folder** action (`xdg-open` / `explorer` / `open`). `share_plus` doesn't support
+  file sharing on Linux, so this branch sidesteps that too.
+
+The action is disabled when the list is empty.
 
 ## Platform notes
 

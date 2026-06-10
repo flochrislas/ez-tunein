@@ -112,8 +112,8 @@ approach.
 
 ## Not done yet (see implementation-notes for the full list)
 
-- Android **release signing** (still uses debug keys); export/share for the
-  app-private saved-tracks CSV. (The Android build itself works — see
+- Android **release signing** (still uses debug keys). (The Android build itself
+  works, and the saved-tracks CSV can be shared off-device via `share_plus` — see
   `doc/android-build.md`.)
 - Edit/reorder stations; URL validation; live-refresh of the saved-tracks view.
 - Rename the internal Dart package / binary name (still `radio`). The application

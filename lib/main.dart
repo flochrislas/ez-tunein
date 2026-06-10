@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_media_kit/just_audio_media_kit.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -599,6 +600,56 @@ class _SavedTracksPageState extends State<SavedTracksPage> {
       ..showSnackBar(SnackBar(content: Text('Copied: $text')));
   }
 
+  /// Get the saved-tracks CSV off the device. On mobile this hands the file to
+  /// the OS share sheet (email, Quick Share, Drive, Save to Files…). On desktop
+  /// the file already lives in the user's Documents folder, so instead we point
+  /// them at it: copy the path and offer to open the containing folder.
+  Future<void> _export() async {
+    final file = await savedTracksFile();
+    if (_tracks.isEmpty || !await file.exists()) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(
+            const SnackBar(content: Text('No saved tracks to export yet.')));
+      return;
+    }
+    if (_isDesktop) {
+      await Clipboard.setData(ClipboardData(text: file.path));
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(SnackBar(
+          content: Text('Path copied: ${file.path}'),
+          action: SnackBarAction(
+            label: 'Open folder',
+            onPressed: () => _openContainingFolder(file),
+          ),
+        ));
+    } else {
+      await SharePlus.instance.share(ShareParams(
+        files: [XFile(file.path, mimeType: 'text/csv')],
+        subject: 'EZ-TuneIn saved tracks',
+      ));
+    }
+  }
+
+  /// Best-effort reveal of [file]'s folder in the desktop file manager.
+  Future<void> _openContainingFolder(File file) async {
+    final dir = file.parent.path;
+    try {
+      if (Platform.isLinux) {
+        await Process.run('xdg-open', [dir]);
+      } else if (Platform.isWindows) {
+        await Process.run('explorer', [dir]);
+      } else if (Platform.isMacOS) {
+        await Process.run('open', [dir]);
+      }
+    } catch (_) {
+      // Opening a file manager is a nicety; ignore failures.
+    }
+  }
+
   Future<void> _clearAll() async {
     final ok = await showDialog<bool>(
       context: context,
@@ -639,6 +690,11 @@ class _SavedTracksPageState extends State<SavedTracksPage> {
         appBar: AppBar(
           title: const Text('Saved tracks'),
           actions: [
+            IconButton(
+              icon: Icon(_isDesktop ? Icons.folder_open : Icons.share),
+              tooltip: _isDesktop ? 'Show file location' : 'Share',
+              onPressed: _tracks.isEmpty ? null : _export,
+            ),
             IconButton(
               icon: const Icon(Icons.delete_sweep),
               tooltip: 'Clear all',
