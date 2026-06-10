@@ -132,6 +132,8 @@ first launch.
 - [`doc/tech-stack.md`](doc/tech-stack.md) — why this stack was chosen.
 - [`doc/android-build.md`](doc/android-build.md) — Android SDK setup, device
   setup, and Android-specific gotchas.
+- [`doc/windows-signing.md`](doc/windows-signing.md) — notes on signing the
+  Windows build and the SmartScreen warning.
 
 ## License
 
