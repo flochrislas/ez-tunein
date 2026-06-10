@@ -1,4 +1,4 @@
-name: radio
+name: ez_tunein
 description: Minimalist internet radio player that saves the current track to a CSV file.
 publish_to: 'none'
 version: 0.1.0

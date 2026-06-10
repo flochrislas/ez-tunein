@@ -67,7 +67,7 @@ scripted in [`script/android-sdk-install.sh`](script/android-sdk-install.sh) and
 ~/flutter/bin/flutter build linux --debug
 
 # Run the built binary
-./build/linux/x64/debug/bundle/radio
+./build/linux/x64/debug/bundle/ez_tunein
 
 # Android: run on an attached phone / build a release APK
 ~/flutter/bin/flutter run                 # debug, on the connected device
@@ -116,5 +116,7 @@ approach.
   works, and the saved-tracks CSV can be shared off-device via `share_plus` — see
   `doc/android-build.md`.)
 - Edit/reorder stations; URL validation; live-refresh of the saved-tracks view.
-- Rename the internal Dart package / binary name (still `radio`). The application
-  ID is already `io.github.flochrislas.eztunein` (Android + Linux GTK).
+
+The Dart package and the on-disk binary are named `ez_tunein`; the application ID
+is `io.github.flochrislas.eztunein` (Android + Linux GTK) and the launcher/window
+title is `EZ-TuneIn` / `EZ-TuneIn Radio`.

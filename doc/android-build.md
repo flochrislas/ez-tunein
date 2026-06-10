@@ -129,5 +129,5 @@ Linux. Saving, viewing, and sharing tracks are all verified on Android and Linux
   build with the **debug** keys (`// TODO: Add your own signing config`). Fine for
   testing; a real keystore is needed before publishing to Play / distributing a
   release APK.
-- **App label** is still `radio` (manifest `android:label`); the public name is
-  EZ-TuneIn.
+_(The launcher label is `EZ-TuneIn` via the manifest's `android:label`; the Dart
+package and binary are named `ez_tunein`.)_

@@ -162,8 +162,9 @@ The action is disabled when the list is empty.
 - Saved-tracks view is a snapshot (no live refresh while open).
 - The application ID is `io.github.flochrislas.eztunein` (Android `applicationId`
   + `namespace`, and the Linux GTK `APPLICATION_ID` — which determines the
-  `shared_preferences` directory). The internal Flutter **package** name is still
-  `radio` (the Dart package + the on-disk binary name); renaming that is more
-  invasive and hasn't been done.
+  `shared_preferences` directory). The Dart **package** and the on-disk **binary**
+  are named `ez_tunein` (`name:` in `pubspec.yaml`; `BINARY_NAME` in the Linux /
+  Windows CMake). The launcher/window title is `EZ-TuneIn` (Android `android:label`)
+  / `EZ-TuneIn Radio` (desktop window title).
 - `album` column is always blank for ICY sources; a per-station JSON API (e.g.
   SomaFM's) could fill it in.
