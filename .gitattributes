@@ -1,0 +1,23 @@
+# Normalize all text files to LF in the repo and on checkout.
+# Stops the "LF will be replaced by CRLF" churn on Windows for the
+# generated linux/ and windows/ plugin files (which Flutter emits as LF).
+* text=auto eol=lf
+
+# Windows-native scripts expect CRLF.
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# Binary assets — never touch line endings.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.ttf  binary
+*.otf  binary
+*.so   binary
+*.dll  binary
+*.exe  binary
+*.mp3  binary
+*.wav  binary
