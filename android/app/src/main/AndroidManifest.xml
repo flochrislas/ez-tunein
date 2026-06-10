@@ -1,8 +1,14 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Reaching internet radio streams. (Debug builds get this automatically,
+         but release/profile builds need it declared here.) -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- usesCleartextTraffic: some relays (e.g. SwissGroove) are plain HTTP;
+         Android blocks cleartext by default since API 28. -->
     <application
         android:label="radio"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:usesCleartextTraffic="true">
         <activity
             android:name=".MainActivity"
             android:exported="true"
