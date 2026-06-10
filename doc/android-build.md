@@ -1,0 +1,129 @@
+# Android Build
+
+How to build and run **EZ-TuneIn Radio** on Android, and the gotchas that bit us
+getting there. Android works today (audio + live metadata + save/view tracks all
+verified on a physical Pixel 9a, Android 16 / API 36).
+
+The dev machine is **Linux (Ubuntu 24.04)** with **no Android Studio** — just the
+command-line SDK. Two helper scripts in [`../script/`](../script/) automate the
+one-time setup:
+
+| Script | What it does |
+|---|---|
+| `android-sdk-install.sh` | Downloads the Android command-line tools, installs the SDK packages, accepts licenses, and points Flutter at the SDK **and** a modern JDK. |
+| `android-udev-fix.sh` | Grants your user USB access to the phone (fixes "adb: insufficient permissions / missing udev rules?"). Needs `sudo`. |
+
+## One-time setup
+
+### 1. Install the SDK
+
+```bash
+bash script/android-sdk-install.sh
+```
+
+This installs into `~/Android/Sdk`:
+
+- `platform-tools` (adb)
+- `platforms;android-36`, `build-tools;36.0.0` — matches the AGP 9 template
+
+…then runs `flutter config --android-sdk` and `flutter config --jdk-dir`.
+
+> **JDK gotcha:** the system default `java` here is **8**, which Gradle 9 / AGP 9
+> reject ("requires JDK 17 or later"). The toolchain needs a **JDK 17+**; we use
+> `/usr/lib/jvm/jdk-25`. The script auto-selects a 17+ JDK (ignoring an `8`
+> pointed at by `JAVA_HOME`) and registers it with `flutter config --jdk-dir`, so
+> Flutter uses it for Gradle without changing the system default. Confirm with
+> `flutter doctor -v` — the Android line should say "Java binary at … jdk-25 …
+> specified in your Flutter configuration" and "All Android licenses accepted".
+
+The project pins recent build tooling (see `android/`): **Gradle 9.1.0**,
+**AGP 9.0.1**, **Kotlin 2.3.20** — which is why JDK 25 is the right match.
+
+### 2. Connect a phone
+
+1. On the phone: enable **Developer options** (tap *Build number* 7×), then turn
+   on **USB debugging**.
+2. Plug it in over USB and approve the **"Allow USB debugging?"** prompt.
+3. On Linux, the device first shows as `unsupported` with
+   `adb: insufficient permissions for device: missing udev rules?` — the USB node
+   is owned by root. Fix it:
+   ```bash
+   sudo bash script/android-udev-fix.sh
+   ```
+   Then **unplug/replug** the phone. It writes a udev rule keyed on the phone's
+   USB vendor id (auto-detected from its serial via `/sys`) granting access via
+   the `uaccess` tag + `plugdev` group, and restarts the adb server.
+4. Verify:
+   ```bash
+   ~/flutter/bin/flutter devices    # phone shows a real model name
+   ```
+
+## Build & run
+
+```bash
+~/flutter/bin/flutter run                       # build, install, launch (debug)
+~/flutter/bin/flutter run -d <serial>           # if multiple devices attached
+~/flutter/bin/flutter build apk --release       # a release .apk artifact
+```
+
+The **first build is slow** (Gradle downloads dependencies, compiles native
+code); later builds are fast. While `flutter run` is attached: `r` = hot reload,
+`R` = hot restart, `q` = quit.
+
+### Reading device logs
+
+The default logcat is drowned in `CCodec`/`MediaCodec` audio-decoder chatter.
+Filter to just the app's Dart output:
+
+```bash
+~/Android/Sdk/platform-tools/adb logcat -c          # clear the buffer
+~/Android/Sdk/platform-tools/adb logcat -s flutter:* # only `debugPrint`/`print`
+```
+
+## App configuration that Android needs
+
+In `android/app/src/main/AndroidManifest.xml`:
+
+- **`<uses-permission android:name="android.permission.INTERNET"/>`** — debug
+  builds get this automatically, but release/profile builds need it declared.
+- **`android:usesCleartextTraffic="true"`** — some relays (e.g. SwissGroove's
+  `relay1.swissgroove.ch:80`) are plain HTTP, which Android blocks by default
+  since API 28. Without this the HTTP stations fail to play (HTTPS ones, like
+  SomaFM, work either way).
+
+## The `play()` gotcha (Android-specific bug we hit)
+
+`just_audio`'s `AudioPlayer.play()` returns a `Future` that completes only when
+playback **ends** (or is paused/stopped). For an endless radio stream it never
+completes — so `await player.play()` blocks forever.
+
+On the desktop **media_kit** backend `play()` returned promptly, so this was
+invisible on Linux/Windows. On Android (**ExoPlayer**) it blocked `_play()`,
+leaving the UI stuck on "Connecting…" and the metadata reader unreached. The fix
+in `_play()` is to **not await** `play()`:
+
+```dart
+await _player.setUrl(station.url);
+unawaited(_player.play());   // NOT: await _player.play();
+```
+
+The lesson: never `await` `just_audio.play()` for a live/endless source.
+
+## Saved tracks on Android
+
+The CSV (`radio_saved_tracks.csv`) is written to the app's documents directory
+via `getApplicationDocumentsDirectory()`. On desktop that's the user's real
+**Documents** folder; on Android it's an **app-private** directory that isn't
+browsable from a file manager. Saving and viewing tracks **works** (verified),
+but the file isn't easy to get off the device — a share/export action is a
+sensible future enhancement.
+
+## Not done yet (Android)
+
+- **Release signing:** `android/app/build.gradle.kts` still signs the release
+  build with the **debug** keys (`// TODO: Add your own signing config`). Fine for
+  testing; a real keystore is needed before publishing to Play / distributing a
+  release APK.
+- **Export/share** for the saved-tracks CSV (see above).
+- **App label** is still `radio` (manifest `android:label`); the public name is
+  EZ-TuneIn.

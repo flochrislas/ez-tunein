@@ -90,17 +90,25 @@ regardless of whether metadata succeeds (it's best-effort and swallows errors).
 - **Saved tracks CSV:** `getApplicationDocumentsDirectory()/radio_saved_tracks.csv`
   with header `timestamp,station,artist,title,album,raw`.
   - On Linux/Windows this is the user's real **Documents** folder.
-  - On Android it's an app-private directory (not browsable) — to revisit when
-    Android is targeted.
+  - On Android it's an app-private directory (not browsable from a file manager).
+    Saving and viewing tracks works; getting the file *off* the device would
+    need a share/export action (see [`android-build.md`](./android-build.md)).
   - `album` is effectively always empty: ICY streams don't carry it. `raw` keeps
     the full original `StreamTitle` as a fallback.
 
 ### Notable flows
 
-- **Now playing:** `_play()` calls `player.setUrl` + `player.play`, then
-  `IcyReader.start(url)`. The reader pushes titles via `onTitle`, which
-  `setState`s `_nowPlaying`. Titles auto-update on each metadata tick (so a
-  momentary partial title from the server self-corrects on the next block).
+- **Now playing:** `_play()` calls `player.setUrl`, then `player.play()`
+  **un-awaited**, then `IcyReader.start(url)`. The reader pushes titles via
+  `onTitle`, which `setState`s `_nowPlaying`. Titles auto-update on each metadata
+  tick (so a momentary partial title from the server self-corrects on the next
+  block).
+  - **Why `play()` is not awaited:** `just_audio`'s `play()` Future completes
+    only when playback *ends*, which never happens for an endless stream —
+    awaiting it would block `_play()` forever, leaving the UI stuck on
+    "Connecting…" and `IcyReader.start` unreached. The desktop media_kit backend
+    happened to return promptly, so this only surfaced on Android (ExoPlayer).
+    See [`android-build.md`](./android-build.md).
 - **Save track:** splits `_nowPlaying` on the first `" - "` into artist/title,
   CSV-escapes each field, appends a row (writing the header first if the file is
   new).
@@ -125,9 +133,11 @@ regardless of whether metadata succeeds (it's best-effort and swallows errors).
 - **Linux** needs `libmpv-dev` / `mpv` installed (the media_kit backend links
   against libmpv). See [`../README.md`](../README.md).
 - **Windows** bundles its media_kit libs — no system install needed.
-- **Android (not yet built):** would need the Android SDK; the HTTP SwissGroove
-  relay needs `android:usesCleartextTraffic="true"`; and the saved-tracks CSV
-  location should be reconsidered (app-private dir → add export/share).
+- **Android (builds & runs):** verified on a physical device (audio, live
+  metadata, save/view tracks). The manifest declares the `INTERNET` permission
+  and `android:usesCleartextTraffic="true"` (the HTTP SwissGroove relay needs the
+  latter). Setup, the `play()` gotcha, and release-signing TODOs live in
+  [`android-build.md`](./android-build.md).
 
 ## Known limitations / possible next steps
 

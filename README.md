@@ -4,7 +4,7 @@ A minimalist, lightweight internet radio player. Tune into your favourite online
 radio stations, see what's playing right now, and save the songs you love — all
 from one clean, dark interface.
 
-Runs on **Windows** and **Linux** today, with **Android** planned.
+Runs on **Windows**, **Linux**, and **Android**.
 
 ## Features
 
@@ -23,8 +23,9 @@ Runs on **Windows** and **Linux** today, with **Android** planned.
 - **Remembers your setup** — volume and (on desktop) the window size persist
   across restarts.
 
-Your saved tracks are written to `radio_saved_tracks.csv` in your **Documents**
-folder, so they're easy to open in a spreadsheet too.
+Your saved tracks are written to `radio_saved_tracks.csv` — on desktop that's
+your **Documents** folder, so they're easy to open in a spreadsheet (on Android
+it's an app-private file you browse via the in-app saved-tracks view).
 
 ## Install & run
 
@@ -92,6 +93,27 @@ defaults — e.g. to get a true "first run" window size again.
    flutter run -d windows         # or: flutter build windows
    ```
 
+### Android
+
+Building for Android needs the Android SDK and a **JDK 17+** (not the SDK's GUI
+IDE). On Linux, two helper scripts automate the one-time setup:
+
+```bash
+bash script/android-sdk-install.sh      # installs the SDK + points Flutter at it
+sudo bash script/android-udev-fix.sh    # USB device permissions (phone plugged in)
+```
+
+Then enable **USB debugging** on the phone, plug it in, and:
+
+```bash
+flutter devices                          # confirm the phone is listed
+flutter run                              # build, install, launch
+flutter build apk --release              # or produce a release .apk
+```
+
+Full walkthrough, gotchas, and release-signing notes:
+[`doc/android-build.md`](doc/android-build.md).
+
 ## Adding / changing stations
 
 Use the **+** button in the app to add a station (name + direct stream URL), and
@@ -105,6 +127,8 @@ first launch.
 
 - [`doc/implementation-notes.md`](doc/implementation-notes.md) — how it's built.
 - [`doc/tech-stack.md`](doc/tech-stack.md) — why this stack was chosen.
+- [`doc/android-build.md`](doc/android-build.md) — Android SDK setup, device
+  setup, and Android-specific gotchas.
 
 ## License
 

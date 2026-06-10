@@ -46,8 +46,13 @@ non-interactive shell. Use the absolute path to be safe:
 ~/flutter/bin/dart <cmd>
 ```
 
-`flutter doctor` is green for Linux desktop; the Android toolchain is **not**
-installed yet (expected — only needed when targeting Android).
+`flutter doctor` is green for Linux desktop **and Android**. The Android SDK is
+installed at `~/Android/Sdk` (command-line tools, no Android Studio). The system
+default `java` is 8 — too old for Gradle 9 / AGP 9 — so Flutter is configured
+(`flutter config --jdk-dir`) to use **JDK 25** at `/usr/lib/jvm/jdk-25`. Setup is
+scripted in [`script/android-sdk-install.sh`](script/android-sdk-install.sh) and
+[`script/android-udev-fix.sh`](script/android-udev-fix.sh); full details in
+[`doc/android-build.md`](doc/android-build.md).
 
 ## Common commands
 
@@ -63,6 +68,12 @@ installed yet (expected — only needed when targeting Android).
 
 # Run the built binary
 ./build/linux/x64/debug/bundle/radio
+
+# Android: run on an attached phone / build a release APK
+~/flutter/bin/flutter run                 # debug, on the connected device
+~/flutter/bin/flutter build apk --release
+# Logs without the MediaCodec noise:
+~/Android/Sdk/platform-tools/adb logcat -s flutter:*
 ```
 
 These need network (pub.dev) and/or write to the project, so they run **outside
@@ -85,6 +96,7 @@ the binary to confirm runtime behaviour (audio/UI can't be observed here).
 
 - **Match the existing style** in `main.dart`: Material 3, dark theme, `FilledButton`s, terse comments that explain *why*.
 - **Metadata is decoupled from playback on purpose.** `just_audio`'s `icyMetadataStream` does NOT work on Windows/Linux, so the app parses ICY itself in `IcyReader`. Do not "simplify" by switching to `icyMetadataStream`. See `doc/implementation-notes.md`.
+- **Never `await player.play()`** for these endless streams — its Future only completes when playback *ends*, so awaiting it hangs `_play()` (was invisible on desktop's media_kit backend, broke Android/ExoPlayer). Use `unawaited(_player.play())`. See `doc/android-build.md`.
 - **Stream URLs must be direct**, not `.pls`/`.m3u` playlist links (unwrap them first — e.g. SwissGroove's `listen.php` → `relay1.swissgroove.ch:80`).
 - **Persistence:** `shared_preferences` keys are `volume`, `stations`, `win_w`, `win_h`. Saved tracks are a CSV in the app documents dir (`savedTracksFile()`); read/write with `_parseCsv` / `_csvField` (RFC-4180, no extra dependency).
 - **`window_manager` is desktop-only** — guard calls with `_isDesktop`.
@@ -100,7 +112,9 @@ approach.
 
 ## Not done yet (see implementation-notes for the full list)
 
-- Android build (SDK, cleartext-HTTP manifest flag, CSV location rethink).
+- Android **release signing** (still uses debug keys); export/share for the
+  app-private saved-tracks CSV. (The Android build itself works — see
+  `doc/android-build.md`.)
 - Edit/reorder stations; URL validation; live-refresh of the saved-tracks view.
 - Rename the internal Dart package / binary name (still `radio`). The application
   ID is already `io.github.flochrislas.eztunein` (Android + Linux GTK).
