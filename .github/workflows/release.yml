@@ -1,0 +1,166 @@
+# Builds the per-platform deliverables and publishes a GitHub Release.
+#
+# Trigger: push a version tag, e.g.
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# Produces (attached to a DRAFT release for you to review, then publish):
+#   - ez-tunein-<tag>-android.apk        (signed, see secrets below)
+#   - ez-tunein-<tag>-linux-x64.tar.gz   (needs libmpv on the user's machine)
+#   - ez-tunein-<tag>-windows-x64.zip    (unsigned — see doc/windows-signing.md)
+#
+# Required repository secrets (Settings → Secrets and variables → Actions) for
+# the signed Android build — matching your android/key.properties:
+#   ANDROID_KEYSTORE_BASE64    base64 -w0 ~/.keystores/ez_tunein-upload.jks
+#   ANDROID_KEYSTORE_PASSWORD  the signing password
+#   ANDROID_KEY_ALIAS          upload
+#
+# Keep the Flutter version in step with the project (see `~/flutter` locally).
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # create the GitHub Release + upload assets
+
+env:
+  FLUTTER_VERSION: '3.44.1'
+
+jobs:
+  # ---------------------------------------------------------------- Android
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Recreate signing config from secrets
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          if [ -z "$KS_B64" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 secret is not set — cannot sign the release."
+            exit 1
+          fi
+          echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/upload.jks"
+          cat > android/key.properties <<EOF
+          storePassword=$KS_PASS
+          keyPassword=$KS_PASS
+          keyAlias=$KS_ALIAS
+          storeFile=$RUNNER_TEMP/upload.jks
+          EOF
+
+      - run: flutter pub get
+      - run: flutter build apk --release
+
+      - name: Verify it's signed with the upload key (not debug)
+        run: |
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -1)
+          "$APKSIGNER" verify --print-certs build/app/outputs/flutter-apk/app-release.apk \
+            | grep -i "certificate DN"
+
+      - name: Name the artifact
+        run: cp build/app/outputs/flutter-apk/app-release.apk "ez-tunein-${{ github.ref_name }}-android.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: ez-tunein-*-android.apk
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------ Linux
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux desktop + libmpv build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang cmake ninja-build pkg-config \
+            libgtk-3-dev liblzma-dev libmpv-dev mpv
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - run: flutter config --enable-linux-desktop
+      - run: flutter pub get
+      - run: flutter build linux --release
+
+      - name: Package the bundle
+        run: |
+          mv build/linux/x64/release/bundle ez-tunein-linux-x64
+          tar czf "ez-tunein-${{ github.ref_name }}-linux-x64.tar.gz" ez-tunein-linux-x64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: ez-tunein-*-linux-x64.tar.gz
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------- Windows
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - run: flutter config --enable-windows-desktop
+      - run: flutter pub get
+      - run: flutter build windows --release
+
+      # TODO (optional): sign the .exe here before zipping, to address the
+      # SmartScreen "Unknown Publisher" warning. See doc/windows-signing.md —
+      # SignPath Foundation (free for OSS) is the intended path.
+
+      - name: Package the bundle
+        shell: pwsh
+        run: |
+          Copy-Item -Recurse build/windows/x64/runner/Release ez-tunein-windows-x64
+          Compress-Archive -Path ez-tunein-windows-x64 -DestinationPath "ez-tunein-${{ github.ref_name }}-windows-x64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: ez-tunein-*-windows-x64.zip
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------- Release
+  release:
+    needs: [android, linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Publish draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true               # review & publish manually
+          generate_release_notes: true
+          files: artifacts/**/*
+          body: |
+            ## EZ-TuneIn ${{ github.ref_name }}
+
+            Downloads:
+            - **Android** — `*-android.apk` (sideload; enable "install unknown apps")
+            - **Windows** — `*-windows-x64.zip` (unzip, run `ez_tunein.exe`).
+              Windows may warn with "Unknown Publisher" — click **More info → Run anyway**.
+            - **Linux** — `*-linux-x64.tar.gz` (extract, run `./ez-tunein-linux-x64/ez_tunein`).
+              Requires **libmpv** installed: `sudo apt install -y libmpv-dev mpv`.
