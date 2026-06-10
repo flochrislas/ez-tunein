@@ -202,13 +202,19 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     });
     try {
       await _player.setUrl(station.url);
-      await _player.play();
-      await _icy.start(station.url); // separate connection just for metadata
+      // Don't await play(): for an endless radio stream just_audio's play()
+      // Future never completes (it only resolves when playback ends/stops), so
+      // awaiting it would block here forever — leaving "Connecting…" stuck and
+      // the metadata reader below unreached. (The media_kit desktop backend
+      // returned promptly, so this only surfaced on Android/ExoPlayer.)
+      unawaited(_player.play());
     } catch (e) {
       _snack('Could not play ${station.name}: $e');
     } finally {
       if (mounted) setState(() => _loading = false);
     }
+    // Metadata is best-effort, on a separate connection — fire-and-forget.
+    _icy.start(station.url);
   }
 
   Future<void> _setVolume(double value) async {
