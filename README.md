@@ -78,7 +78,15 @@ defaults — e.g. to get a true "first run" window size again.
    ```
 4. **Add to PATH:** add `C:\src\flutter\bin` via *Settings → Edit environment
    variables for your account → Path → New*, then open a fresh terminal.
-5. **Run it** (`media_kit` bundles its own libs on Windows — no libmpv needed):
+5. **Enable Developer Mode** — Flutter needs symlink support to build with
+   plugins. Open *Settings → System → For developers* and turn on **Developer
+   Mode** (or run `start ms-settings:developers`). Without it the build fails
+   with *"Building with plugins requires symlink support. Please enable
+   Developer Mode..."*. From an **admin** PowerShell you can also enable it with:
+   ```powershell
+   reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" /t REG_DWORD /f /v AllowDevelopmentWithoutDevLicense /d 1
+   ```
+6. **Run it** (`media_kit` bundles its own libs on Windows — no libmpv needed):
    ```powershell
    flutter pub get
    flutter run -d windows         # or: flutter build windows
