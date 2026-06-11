@@ -27,6 +27,9 @@ This is a git repo, public on GitHub at **https://github.com/flochrislas/ez-tune
   noreply email — do not change it to the global/work identity, and don't expose
   a real email in commit history.
 - `git log` is now part of the project's history — use it for context on past changes.
+- **Releases** are built & published by GitHub Actions on a `v*` tag push (signed
+  Android APK + Linux tarball + Windows zip → a draft GitHub Release). See
+  `doc/releasing.md` for the full process.
 - Commit/push only when asked (per the usual workflow rules).
 
 ## Layout

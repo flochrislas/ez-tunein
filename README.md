@@ -134,6 +134,8 @@ first launch.
   setup, and Android-specific gotchas.
 - [`doc/windows-signing.md`](doc/windows-signing.md) — notes on signing the
   Windows build and the SmartScreen warning.
+- [`doc/releasing.md`](doc/releasing.md) — how to cut a release (version bump,
+  tag, the GitHub Actions build, publish).
 
 ## License
 
