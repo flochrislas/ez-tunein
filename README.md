@@ -30,7 +30,38 @@ Your saved tracks are written to `radio_saved_tracks.csv` — on desktop that's
 your **Documents** folder, so they're easy to open in a spreadsheet (on Android
 it's an app-private file you browse via the in-app saved-tracks view).
 
-## Install & run
+## How to install
+
+Grab the latest build from the
+[**Releases**](https://github.com/flochrislas/ez-tunein/releases/latest) page — no
+toolchain needed. Pick the file for your platform:
+
+### Android
+
+Download `ez-tunein-<version>-android.apk` to your phone and open it. The first
+time, you'll need to allow installing from your browser or file manager ("install
+unknown apps"). The APK is signed, so later versions install cleanly over it.
+
+### Windows
+
+Download `ez-tunein-<version>-windows-x64.zip`, extract it anywhere, and run
+**`ez_tunein.exe`** — nothing else to install. Windows may show a blue
+**SmartScreen** warning ("Windows protected your PC") because the app isn't signed
+yet; click **More info → Run anyway**.
+
+### Linux
+
+Download `ez-tunein-<version>-linux-x64.tar.gz`, then:
+
+```
+sudo apt install -y libmpv-dev mpv      # the audio backend needs libmpv
+tar xzf ez-tunein-*-linux-x64.tar.gz
+./ez-tunein-linux-x64/ez_tunein
+```
+
+Prefer to build it yourself? See **How to build and run** below.
+
+## How to build and run
 
 You'll need the [Flutter SDK](https://docs.flutter.dev/get-started/install). Once
 it's installed, from a clone of this repo:
