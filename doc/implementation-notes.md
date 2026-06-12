@@ -120,11 +120,17 @@ regardless of whether metadata succeeds (it's best-effort and swallows errors).
   first stream already uses the saved level.
 - **Window size:** restored in `main()`; saved on `onWindowResize`, **debounced
   400 ms** so dragging doesn't hammer the prefs store. Size only — not position.
-- **Saved-tracks table:** loads a snapshot on open (reloads each time the screen
-  is opened, but does not live-update while open). Sortable by any column
-  (date sorts on the raw ISO string; artist/title case-insensitive). Row tap
-  copies `"artist - title"` to the clipboard. Clear-all confirms, then truncates
-  the file back to just the header.
+- **Saved-tracks view:** loads a snapshot on open (reloads each time the screen
+  is opened, but does not live-update while open). Sorting on any field sorts
+  `_tracks` in place (date on the raw ISO string; artist/title/station
+  case-insensitive). Row tap copies `"artist - title"` to the clipboard.
+  Clear-all confirms, then truncates the file back to just the header.
+  - **Responsive layout** (`_buildDataTable` / `_buildCompactList`): desktop shows
+    the full sortable `DataTable`; on mobile that's too wide and forces horizontal
+    scrolling, so phones get a `ListView` of compact rows ("Artist — Title" over a
+    muted "station · date"). The compact list has no column headers, so sorting
+    moves to a `PopupMenuButton` in the app bar (value is a `(columnIndex,
+    ascending)` record passed straight to `_onSort`).
 
 ### Export / share the CSV
 

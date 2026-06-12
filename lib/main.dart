@@ -677,6 +677,70 @@ class _SavedTracksPageState extends State<SavedTracksPage> {
     setState(() => _tracks = []);
   }
 
+  /// Desktop layout: the full sortable table (a wide window can scroll if it
+  /// ever needs to).
+  Widget _buildDataTable() {
+    return SingleChildScrollView(
+      scrollDirection: Axis.vertical,
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: DataTable(
+          sortColumnIndex: _sortColumn,
+          sortAscending: _ascending,
+          showCheckboxColumn: false,
+          columns: [
+            DataColumn(label: const Text('Saved at'), onSort: _onSort),
+            DataColumn(label: const Text('Radio station'), onSort: _onSort),
+            DataColumn(label: const Text('Artist'), onSort: _onSort),
+            DataColumn(label: const Text('Title'), onSort: _onSort),
+          ],
+          rows: [
+            for (final t in _tracks)
+              DataRow(
+                onSelectChanged: (_) => _copy(t),
+                cells: [
+                  DataCell(Text(_fmtDateTime(t.timestamp))),
+                  DataCell(Text(t.station)),
+                  DataCell(Text(t.artist)),
+                  DataCell(Text(t.title)),
+                ],
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Phone layout: a vertical list that never scrolls horizontally. Each row
+  /// stacks "Artist — Title" over a muted "station · date" line; tapping copies
+  /// "artist - title" (same as a table-row tap). Sorting is via the app-bar menu.
+  Widget _buildCompactList(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return ListView.separated(
+      itemCount: _tracks.length,
+      separatorBuilder: (_, __) => const Divider(height: 1),
+      itemBuilder: (context, i) {
+        final t = _tracks[i];
+        final headline =
+            t.artist.isEmpty ? t.title : '${t.artist} — ${t.title}';
+        return ListTile(
+          title: Text(
+            headline.isEmpty ? '(untitled)' : headline,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+          ),
+          subtitle: Text(
+            '${t.station} · ${_fmtDateTime(t.timestamp)}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(color: scheme.onSurfaceVariant),
+          ),
+          onTap: () => _copy(t),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Theme(
@@ -690,6 +754,22 @@ class _SavedTracksPageState extends State<SavedTracksPage> {
         appBar: AppBar(
           title: const Text('Saved tracks'),
           actions: [
+            // The compact phone list has no column headers, so sorting moves
+            // here. (record = (columnIndex, ascending) — see _onSort.)
+            if (!_isDesktop)
+              PopupMenuButton<(int, bool)>(
+                icon: const Icon(Icons.sort),
+                tooltip: 'Sort',
+                enabled: _tracks.isNotEmpty,
+                onSelected: (c) => _onSort(c.$1, c.$2),
+                itemBuilder: (_) => const [
+                  PopupMenuItem(value: (0, false), child: Text('Newest first')),
+                  PopupMenuItem(value: (0, true), child: Text('Oldest first')),
+                  PopupMenuItem(value: (2, true), child: Text('Artist A–Z')),
+                  PopupMenuItem(value: (3, true), child: Text('Title A–Z')),
+                  PopupMenuItem(value: (1, true), child: Text('Station A–Z')),
+                ],
+              ),
             IconButton(
               icon: Icon(_isDesktop ? Icons.folder_open : Icons.share),
               tooltip: _isDesktop ? 'Show file location' : 'Share',
@@ -706,47 +786,9 @@ class _SavedTracksPageState extends State<SavedTracksPage> {
             ? const Center(child: CircularProgressIndicator())
             : _tracks.isEmpty
                 ? const Center(child: Text('No saved tracks yet.'))
-                : SingleChildScrollView(
-                    scrollDirection: Axis.vertical,
-                    child: SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      child: DataTable(
-                        sortColumnIndex: _sortColumn,
-                        sortAscending: _ascending,
-                        showCheckboxColumn: false,
-                        columns: [
-                          DataColumn(
-                            label: const Text('Saved at'),
-                            onSort: _onSort,
-                          ),
-                          DataColumn(
-                            label: const Text('Radio station'),
-                            onSort: _onSort,
-                          ),
-                          DataColumn(
-                            label: const Text('Artist'),
-                            onSort: _onSort,
-                          ),
-                          DataColumn(
-                            label: const Text('Title'),
-                            onSort: _onSort,
-                          ),
-                        ],
-                        rows: [
-                          for (final t in _tracks)
-                            DataRow(
-                              onSelectChanged: (_) => _copy(t),
-                              cells: [
-                                DataCell(Text(_fmtDateTime(t.timestamp))),
-                                DataCell(Text(t.station)),
-                                DataCell(Text(t.artist)),
-                                DataCell(Text(t.title)),
-                              ],
-                            ),
-                        ],
-                      ),
-                    ),
-                  ),
+                : _isDesktop
+                    ? _buildDataTable()
+                    : _buildCompactList(context),
       ),
     );
   }
