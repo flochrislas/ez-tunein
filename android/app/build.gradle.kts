@@ -19,7 +19,9 @@ if (keystorePropertiesFile.exists()) {
 
 android {
     namespace = "io.github.flochrislas.eztunein"
-    compileSdk = flutter.compileSdkVersion
+    // file_picker's flutter_plugin_android_lifecycle requires compileSdk >= 36,
+    // which is newer than Flutter's current default — pin it explicitly.
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
