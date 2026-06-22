@@ -69,6 +69,8 @@ const _defaultStations = <Station>[
   Station('SomaFM — Lush', 'https://ice1.somafm.com/lush-128-mp3'),
   // Direct relay from swissgroove.ch's listen.php M3U (relay2 is a fallback).
   Station('SwissGroove', 'http://relay1.swissgroove.ch:80'),
+  // Nightride FM (synthwave) — Icecast mount, 320 kbps MP3.
+  Station('Nightride FM', 'https://stream.nightride.fm/nightride.mp3'),
 ];
 
 class RadioApp extends StatelessWidget {
