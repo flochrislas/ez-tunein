@@ -11,8 +11,9 @@ A minimalist internet-radio player:
 1. Plays Icecast/Shoutcast streams (SomaFM, SwissGroove, …).
 2. Shows the live "now playing" track (artist + title).
 3. Saves the current track to a CSV file on a button click.
-4. Lets you add/remove stations, adjust & persist volume, browse/sort/copy/clear
-   saved tracks, and (on desktop) remembers its window size.
+4. Lets you add/remove stations (and import/export the list as a CSV), adjust &
+   persist volume, browse/sort/copy/clear saved tracks, and (on desktop)
+   remembers its window size.
 
 ## Stack
 
@@ -25,6 +26,10 @@ A minimalist internet-radio player:
   plain CSV file (saved tracks).
 - **Window sizing:** `window_manager` (desktop only).
 - **Export:** `share_plus` (OS share sheet for the saved-tracks CSV on mobile).
+  Pinned to `^12`: `^13` requires `win32 ^6`, which conflicts with
+  `file_picker`'s `win32 ^5`.
+- **Station list import/export:** `file_picker` (native open/save dialogs on all
+  three platforms; on Linux it shells out to `zenity`/`kdialog`).
 
 Everything lives in a single file, **`lib/main.dart`** — the app is small enough
 that splitting it would add more ceremony than clarity.
@@ -74,8 +79,10 @@ regardless of whether metadata succeeds (it's best-effort and swallows errors).
 | `Station` | `{name, url}` value object with `toJson`/`fromJson`. |
 | `_defaultStations` | The seed list used on first launch only. |
 | `PlayerPage` / `_PlayerPageState` | The main screen. Owns the `AudioPlayer`, the `IcyReader`, the station list, volume, and (via `WindowListener`) window-resize persistence. |
-| `_StationTile` | A station row that reveals its delete button only on hover (`MouseRegion`). |
-| `_AddStationDialog` | Minimal name + URL dialog; returns a `Station`. |
+| `_StationTile` | A station row that reveals its edit + delete buttons only on hover (`MouseRegion`). |
+| `_actionTile` | The dimmed/italic list rows for add / import / export at the end of the station list. |
+| `_importStations` / `_exportStations` | Import/export the station list as a `name,url` CSV via `file_picker`. |
+| `_StationDialog` | Minimal name + URL dialog; returns a `Station`. Pre-fills from `initial` to edit (vs. add). |
 | `SavedTracksPage` / `SavedTrack` | The saved-tracks table screen. Its `_export` shares the CSV (share sheet on mobile, reveal-in-folder on desktop). |
 | `IcyReader` | The ICY metadata reader described above. |
 | `savedTracksFile()` | Resolves the CSV path (shared by writer and reader). |
@@ -113,9 +120,14 @@ regardless of whether metadata succeeds (it's best-effort and swallows errors).
 - **Save track:** splits `_nowPlaying` on the first `" - "` into artist/title,
   CSV-escapes each field, appends a row (writing the header first if the file is
   new).
-- **Add/remove stations:** mutate `_stations`, then `_saveStations()` writes the
-  JSON. Adding rejects a URL already present (exact-string match). Removing the
-  currently-playing station stops playback first.
+- **Add/edit/remove stations:** mutate `_stations`, then `_saveStations()` writes
+  the JSON. Adding rejects a URL already present (exact-string match). Editing
+  (`_editStation`) reuses `_StationDialog` pre-filled with the station, rejects a
+  URL change that collides with a *different* station, replaces the entry in place
+  (preserving order), and — if the edited station was playing — points `_current`
+  at the new object so the highlight/label stay in sync (the audio keeps running
+  on the old connection until the user re-taps). Removing the currently-playing
+  station stops playback first.
 - **Volume:** applied to the player *before* first playback on restore, so the
   first stream already uses the saved level.
 - **Window size:** restored in `main()`; saved on `onWindowResize`, **debounced
@@ -146,6 +158,26 @@ regardless of whether metadata succeeds (it's best-effort and swallows errors).
 
 The action is disabled when the list is empty.
 
+### Import / export the station list
+
+Two dimmed action rows sit at the end of the station list (after "Add a new
+radio station…"), built by `_actionTile`. Both use **`file_picker`** for the
+native dialogs:
+
+- **Export** (`_exportStations`): builds a `name,url` CSV (header row +
+  `_csvField`-escaped rows) and opens a save dialog. On desktop `saveFile`
+  returns the chosen path and we `writeAsString`; on mobile there's no writable
+  path, so we hand `file_picker` the `bytes` and it writes the file itself.
+- **Import** (`_importStations`): opens a file picker (`withData: true` so mobile
+  gets the bytes), reads the file (`bytes` on mobile, `path` on desktop), parses
+  it with the shared `_parseCsv`, and **merges non-destructively** — it skips any
+  URL already present (same dedup rule as add) and tolerates an optional
+  `name,url` header. A snackbar reports how many were imported vs. skipped.
+
+The CSV format is deliberately just `name,url` (distinct from the richer
+saved-tracks CSV) so it's trivial to hand-edit or share. On Linux `file_picker`
+requires `zenity`/`kdialog` at runtime.
+
 ## Platform notes
 
 - **Desktop window title** (`linux/runner/my_application.cc`, and the Windows
@@ -162,7 +194,7 @@ The action is disabled when the list is empty.
 
 ## Known limitations / possible next steps
 
-- Stations can be added/removed but not **edited** or **reordered**.
+- Stations can be added/removed/edited but not **reordered**.
 - No URL validation beyond non-empty; a bad URL surfaces as a "Could not play"
   snackbar.
 - Saved-tracks view is a snapshot (no live refresh while open).

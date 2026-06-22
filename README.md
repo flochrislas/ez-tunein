@@ -21,8 +21,11 @@ Runs on **Windows**, **Linux**, and **Android**.
   share sheet (email it to yourself, send it to your PC, save to Drive…); on
   desktop the file's already in your Documents folder and the button reveals it.
 - **Manage your stations** — add a station with the **+** button, or hover a
-  station and click the trash icon to remove it. Your list is remembered between
-  launches.
+  station to reveal **edit** (rename / change the URL) and **delete** icons. Your
+  list is remembered between launches.
+- **Import / export your stations** — back up or share your station list as a
+  simple `name,url` CSV, and import one back in (new stations are merged in;
+  duplicates are skipped). Both live at the bottom of the station list.
 - **Remembers your setup** — volume and (on desktop) the window size persist
   across restarts.
 
@@ -151,11 +154,18 @@ Full walkthrough, gotchas, and release-signing notes:
 ## Adding / changing stations
 
 Use the **+** button in the app to add a station (name + direct stream URL), and
-hover a station to reveal a delete button. Your list is saved between launches.
+hover a station to reveal **edit** and **delete** buttons. Your list is saved
+between launches.
 The defaults in `_defaultStations` (top of `lib/main.dart`) only seed the very
 first launch.
 
 > Stream URLs must be **direct** — not `.pls`/`.m3u` playlist links.
+
+To move your stations between machines, use **Import / Export stations from CSV…**
+at the bottom of the list. The file is a plain `name,url` CSV (with a header row)
+you can also edit by hand. Import is **non-destructive** — it adds stations whose
+URL isn't already in your list and skips the rest. On Linux the file picker needs
+`zenity` (or `kdialog`) installed, which most desktops already have.
 
 ## Documentation
 

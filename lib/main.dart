@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:just_audio/just_audio.dart';
@@ -169,7 +170,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   Future<void> _addStation() async {
     final station = await showDialog<Station>(
       context: context,
-      builder: (_) => const _AddStationDialog(),
+      builder: (_) => const _StationDialog(),
     );
     if (station == null) return;
     if (_stations.any((s) => s.url == station.url)) {
@@ -180,10 +181,134 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     await _saveStations();
   }
 
+  Future<void> _editStation(Station old) async {
+    final updated = await showDialog<Station>(
+      context: context,
+      builder: (_) => _StationDialog(initial: old),
+    );
+    if (updated == null) return;
+    // Reject a URL change that would collide with a *different* station.
+    if (updated.url != old.url && _stations.any((s) => s.url == updated.url)) {
+      _snack('That stream URL is already in the list.');
+      return;
+    }
+    final i = _stations.indexWhere((s) => s.url == old.url);
+    if (i < 0) return; // gone (e.g. removed while the dialog was open)
+    setState(() {
+      _stations[i] = updated;
+      // Keep the now-playing highlight/title in sync if we edited the current
+      // station. Playback itself keeps running on the old connection until the
+      // user re-taps — only the list entry and label update.
+      if (_current?.url == old.url) _current = updated;
+    });
+    await _saveStations();
+  }
+
   Future<void> _removeStation(Station station) async {
     if (_current?.url == station.url) await _stop();
     setState(() => _stations.removeWhere((s) => s.url == station.url));
     await _saveStations();
+  }
+
+  /// Import stations from a user-picked CSV (`name,url` per row, optional
+  /// header). Merges into the current list, skipping URLs already present, so
+  /// importing is always non-destructive (same dedup rule as [_addStation]).
+  Future<void> _importStations() async {
+    final FilePickerResult? result;
+    try {
+      result = await FilePicker.platform.pickFiles(
+        dialogTitle: 'Import radio stations',
+        type: FileType.custom,
+        allowedExtensions: ['csv'],
+        withData: true, // need the bytes on mobile (no readable file path)
+      );
+    } catch (e) {
+      _snack('Import failed: $e');
+      return;
+    }
+    if (result == null) return; // user cancelled
+
+    final picked = result.files.single;
+    String content;
+    try {
+      if (picked.bytes != null) {
+        content = utf8.decode(picked.bytes!, allowMalformed: true);
+      } else if (picked.path != null) {
+        content = await File(picked.path!).readAsString();
+      } else {
+        _snack('Could not read the selected file.');
+        return;
+      }
+    } catch (e) {
+      _snack('Could not read the selected file: $e');
+      return;
+    }
+
+    final seen = _stations.map((s) => s.url).toSet();
+    final toAdd = <Station>[];
+    var skipped = 0;
+    for (final r in _parseCsv(content)) {
+      if (r.length < 2) continue;
+      final name = r[0].trim();
+      final url = r[1].trim();
+      if (name.isEmpty || url.isEmpty) continue;
+      // Tolerate a header row written by our own export (or by hand).
+      if (name.toLowerCase() == 'name' && url.toLowerCase() == 'url') continue;
+      if (!seen.add(url)) {
+        skipped++; // duplicate within the file or already in the list
+        continue;
+      }
+      toAdd.add(Station(name, url));
+    }
+
+    if (toAdd.isEmpty) {
+      _snack(skipped > 0
+          ? 'Nothing to import — those $skipped station(s) are already in your list.'
+          : 'No stations found in that file.');
+      return;
+    }
+    setState(() => _stations.addAll(toAdd));
+    await _saveStations();
+    _snack('Imported ${toAdd.length} station(s)'
+        '${skipped > 0 ? ' ($skipped already present)' : ''}.');
+  }
+
+  /// Export the current station list to a user-chosen CSV file (`name,url`,
+  /// with a header row that [_importStations] knows to skip).
+  Future<void> _exportStations() async {
+    if (_stations.isEmpty) {
+      _snack('No stations to export.');
+      return;
+    }
+    final csv = StringBuffer('name,url\n');
+    for (final s in _stations) {
+      csv.writeln('${_csvField(s.name)},${_csvField(s.url)}');
+    }
+    final bytes = utf8.encode(csv.toString());
+
+    String? path;
+    try {
+      path = await FilePicker.platform.saveFile(
+        dialogTitle: 'Export radio stations',
+        fileName: 'ez_tunein_stations.csv',
+        type: FileType.custom,
+        allowedExtensions: ['csv'],
+        // Mobile can't hand back a writable path, so file_picker writes these
+        // bytes itself; on desktop it returns the path and we write below.
+        bytes: _isDesktop ? null : bytes,
+      );
+    } catch (e) {
+      _snack('Export failed: $e');
+      return;
+    }
+    if (path == null) return; // user cancelled
+
+    try {
+      if (_isDesktop) await File(path).writeAsString(csv.toString());
+      _snack('Exported ${_stations.length} station(s).');
+    } catch (e) {
+      _snack('Export failed: $e');
+    }
   }
 
   @override
@@ -279,6 +404,23 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
       ..showSnackBar(SnackBar(content: Text(message)));
   }
 
+  /// A dimmed, italic list row that reads as an action rather than a station
+  /// entry (used for add / import / export at the end of the list).
+  Widget _actionTile(IconData icon, String label, VoidCallback onTap) {
+    final muted = Theme.of(context)
+        .colorScheme
+        .onSurfaceVariant
+        .withValues(alpha: 0.55);
+    return ListTile(
+      leading: Icon(icon, color: muted),
+      title: Text(
+        label,
+        style: TextStyle(color: muted, fontStyle: FontStyle.italic),
+      ),
+      onTap: onTap,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final playing = _current != null;
@@ -366,32 +508,27 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
             const Divider(),
             Expanded(
               child: ListView.builder(
-                itemCount: _stations.length + 1,
+                // Three trailing action rows after the stations: add, import,
+                // export.
+                itemCount: _stations.length + 3,
                 itemBuilder: (context, i) {
-                  // Last row: the "add a station" affordance, shown dimmer than
-                  // the real stations to read as an action rather than an entry.
-                  if (i == _stations.length) {
-                    final muted = Theme.of(context)
-                        .colorScheme
-                        .onSurfaceVariant
-                        .withValues(alpha: 0.55);
-                    return ListTile(
-                      leading: Icon(Icons.add, color: muted),
-                      title: Text(
-                        'Add a new radio station…',
-                        style: TextStyle(
-                          color: muted,
-                          fontStyle: FontStyle.italic,
-                        ),
-                      ),
-                      onTap: _addStation,
-                    );
+                  switch (i - _stations.length) {
+                    case 0:
+                      return _actionTile(
+                          Icons.add, 'Add a new radio station…', _addStation);
+                    case 1:
+                      return _actionTile(Icons.file_download_outlined,
+                          'Import stations from CSV…', _importStations);
+                    case 2:
+                      return _actionTile(Icons.file_upload_outlined,
+                          'Export stations to CSV…', _exportStations);
                   }
                   final s = _stations[i];
                   return _StationTile(
                     station: s,
                     isCurrent: _current?.url == s.url,
                     onTap: () => _play(s),
+                    onEdit: () => _editStation(s),
                     onDelete: () => _removeStation(s),
                   );
                 },
@@ -410,12 +547,14 @@ class _StationTile extends StatefulWidget {
     required this.station,
     required this.isCurrent,
     required this.onTap,
+    required this.onEdit,
     required this.onDelete,
   });
 
   final Station station;
   final bool isCurrent;
   final VoidCallback onTap;
+  final VoidCallback onEdit;
   final VoidCallback onDelete;
 
   @override
@@ -440,10 +579,20 @@ class _StationTileState extends State<_StationTile> {
         selected: widget.isCurrent,
         onTap: widget.onTap,
         trailing: _hovered
-            ? IconButton(
-                icon: const Icon(Icons.delete_outline),
-                tooltip: 'Remove station',
-                onPressed: widget.onDelete,
+            ? Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.edit_outlined),
+                    tooltip: 'Edit station',
+                    onPressed: widget.onEdit,
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.delete_outline),
+                    tooltip: 'Remove station',
+                    onPressed: widget.onDelete,
+                  ),
+                ],
               )
             : null,
       ),
@@ -451,17 +600,20 @@ class _StationTileState extends State<_StationTile> {
   }
 }
 
-/// A minimal dialog that collects a station name + stream URL.
-class _AddStationDialog extends StatefulWidget {
-  const _AddStationDialog();
+/// A minimal dialog that collects a station name + stream URL. Pass [initial]
+/// to pre-fill it for editing an existing station; omit it to add a new one.
+class _StationDialog extends StatefulWidget {
+  const _StationDialog({this.initial});
+
+  final Station? initial;
 
   @override
-  State<_AddStationDialog> createState() => _AddStationDialogState();
+  State<_StationDialog> createState() => _StationDialogState();
 }
 
-class _AddStationDialogState extends State<_AddStationDialog> {
-  final _name = TextEditingController();
-  final _url = TextEditingController();
+class _StationDialogState extends State<_StationDialog> {
+  late final _name = TextEditingController(text: widget.initial?.name ?? '');
+  late final _url = TextEditingController(text: widget.initial?.url ?? '');
 
   @override
   void dispose() {
@@ -479,8 +631,9 @@ class _AddStationDialogState extends State<_AddStationDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final editing = widget.initial != null;
     return AlertDialog(
-      title: const Text('Add station'),
+      title: Text(editing ? 'Edit station' : 'Add station'),
       content: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -508,7 +661,7 @@ class _AddStationDialogState extends State<_AddStationDialog> {
         ),
         FilledButton(
           onPressed: _submit,
-          child: const Text('Add'),
+          child: Text(editing ? 'Save' : 'Add'),
         ),
       ],
     );

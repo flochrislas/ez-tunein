@@ -21,7 +21,10 @@ dependencies:
   # Desktop (Windows/Linux/macOS) window sizing + persistence
   window_manager: ^0.4.3
   # Share the saved-tracks CSV via the OS share sheet (mobile: email/Drive/etc.)
-  share_plus: ^13.1.0
+  # Pinned to ^12 so its win32 constraint stays compatible with file_picker.
+  share_plus: ^12.0.0
+  # Native open/save dialogs for import/export of the radio station list
+  file_picker: ^8.1.0
 
 dev_dependencies:
   flutter_lints: ^4.0.0
