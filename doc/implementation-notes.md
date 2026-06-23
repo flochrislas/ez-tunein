@@ -11,9 +11,10 @@ A minimalist internet-radio player:
 1. Plays Icecast/Shoutcast streams (SomaFM, SwissGroove, …).
 2. Shows the live "now playing" track (artist + title).
 3. Saves the current track to a CSV file on a button click.
-4. Lets you add/remove stations (and import/export the list as a CSV), adjust &
-   persist volume, browse/sort/copy/clear saved tracks, and (on desktop)
-   remembers its window size.
+4. Lets you add/remove stations (and import/export the list as a CSV), filter the
+   list by name (type-to-search), adjust & persist volume, browse/sort/copy/clear
+   saved tracks, keeps an automatic **play history** (with a logging on/off
+   toggle), and (on desktop) remembers its window size.
 
 ## Stack
 
@@ -22,8 +23,8 @@ A minimalist internet-radio player:
   desktop it routes through `just_audio_media_kit` (+ `media_kit_libs_audio`),
   which wraps **libmpv**.
 - **Track metadata:** a hand-written ICY reader (no package — see below).
-- **Persistence:** `shared_preferences` (volume, station list, window size) and a
-  plain CSV file (saved tracks).
+- **Persistence:** `shared_preferences` (volume, station list, window size,
+  history-logging flag) and two plain CSV files (saved tracks + play history).
 - **Window sizing:** `window_manager` (desktop only).
 - **Export:** `share_plus` (OS share sheet for the saved-tracks CSV on mobile).
   Pinned to `^12`: `^13` requires `win32 ^6`, which conflicts with
@@ -77,15 +78,17 @@ regardless of whether metadata succeeds (it's best-effort and swallows errors).
 | `main()` | Inits the desktop audio backend; on desktop restores saved window size via `window_manager` before showing the window. |
 | `RadioApp` | `MaterialApp` — dark Material 3 theme (teal seed), debug banner off. |
 | `Station` | `{name, url}` value object with `toJson`/`fromJson`. |
-| `_defaultStations` | The seed list used on first launch only. |
-| `PlayerPage` / `_PlayerPageState` | The main screen. Owns the `AudioPlayer`, the `IcyReader`, the station list, volume, and (via `WindowListener`) window-resize persistence. |
+| `_defaultStations` | The seed list used on first launch only (mirrors `radios-selection.csv` at the repo root). |
+| `PlayerPage` / `_PlayerPageState` | The main screen. Owns the `AudioPlayer`, the `IcyReader`, the station list, volume, and (via `WindowListener`) window-resize persistence. `_recordHistory` logs each played song (see [Play history](#play-history)). |
 | `_StationTile` | A station row that reveals its edit + delete buttons only on hover (`MouseRegion`). |
 | `_actionTile` | The dimmed/italic list rows for add / import / export at the end of the station list. |
+| `_searchBar` / `_openSearch` / `_closeSearch` / `_onPageKey` | The type-to-search station filter (see [Filtering](#filtering--type-to-search)). |
 | `_importStations` / `_exportStations` | Import/export the station list as a `name,url` CSV via `file_picker`. |
 | `_StationDialog` | Minimal name + URL dialog; returns a `Station`. Pre-fills from `initial` to edit (vs. add). |
-| `SavedTracksPage` / `SavedTrack` | The saved-tracks table screen. Its `_export` shares the CSV (share sheet on mobile, reveal-in-folder on desktop). |
+| `_TrackListPage` / `SavedTrack` | The shared sortable/searchable table screen, used for **both** saved tracks and play history (parameterized by `title` / `fileResolver` / `emptyMessage` / `shareSubject` / `isHistory`). `_export` shares the CSV (share sheet on mobile, reveal-in-folder on desktop); `_historyControls` adds the count + logging toggle when `isHistory`. |
 | `IcyReader` | The ICY metadata reader described above. |
-| `savedTracksFile()` | Resolves the CSV path (shared by writer and reader). |
+| `savedTracksFile()` / `historyFile()` | Resolve the two CSV paths (`radio_saved_tracks.csv` / `radio_history.csv`). |
+| `_splitArtistTitle` | Splits a raw ICY `"Artist - Title"` string; shared by save + history. |
 | `_parseCsv` / `_csvField` | RFC-4180 CSV read/write (no dependency). |
 | `_fmtDateTime` | Formats the ISO timestamp as `YYYY-MM-DD HH:MM`. |
 
@@ -95,8 +98,12 @@ regardless of whether metadata succeeds (it's best-effort and swallows errors).
   - `volume` (double, 0.0–1.0)
   - `stations` (JSON string — array of `{name, url}`)
   - `win_w`, `win_h` (doubles)
+  - `history_logging` (bool, default `true` — whether the player logs to history)
 - **Saved tracks CSV:** `getApplicationDocumentsDirectory()/radio_saved_tracks.csv`
   with header `timestamp,station,artist,title,album,raw`.
+  - **Play history** uses a second CSV, `radio_history.csv`, in the same
+    directory with the **same** header (so the same parser, table, export, and
+    clear logic serve both — see [Play history](#play-history)).
   - On Linux/Windows this is the user's real **Documents** folder.
   - On Android it's an app-private directory (not browsable from a file manager).
     The saved-tracks view's **Share** action (`_export`) gets the file off the
@@ -128,6 +135,8 @@ regardless of whether metadata succeeds (it's best-effort and swallows errors).
   at the new object so the highlight/label stay in sync (the audio keeps running
   on the old connection until the user re-taps). Removing the currently-playing
   station stops playback first.
+- **Play history:** see [Play history](#play-history).
+- **Filtering (type-to-search):** see [Filtering](#filtering--type-to-search).
 - **Volume:** applied to the player *before* first playback on restore, so the
   first stream already uses the saved level.
 - **Window size:** restored in `main()`; saved on `onWindowResize`, **debounced
@@ -146,7 +155,8 @@ regardless of whether metadata succeeds (it's best-effort and swallows errors).
 
 ### Export / share the CSV
 
-`_export()` (saved-tracks view) is **platform-adaptive**:
+`_export()` (the shared `_TrackListPage`, so both saved tracks and history) is
+**platform-adaptive**:
 
 - **Mobile (Android/iOS):** hands the CSV to the OS share sheet via `share_plus`
   (`SharePlus.instance.share` with an `XFile`) — email, Quick Share, Drive, "Save
@@ -178,6 +188,58 @@ The CSV format is deliberately just `name,url` (distinct from the richer
 saved-tracks CSV) so it's trivial to hand-edit or share. On Linux `file_picker`
 requires `zenity`/`kdialog` at runtime.
 
+### Play history
+
+Every song that plays is logged automatically to `radio_history.csv`, viewable
+from the **clock** icon in the app bar.
+
+- **Recording (`_recordHistory`).** Called from `IcyReader.onTitle` (same hook
+  that updates "now playing"). The reader re-emits the same `StreamTitle` on every
+  metadata tick, so it dedups against `_lastHistoryTitle` and appends a row only
+  when the title changes; `_lastHistoryTitle` resets in `_play`/`_stop` so a new
+  session (or the same song on another station) logs afresh. A song is captured
+  the moment its info arrives — even a brief listen counts. Rows reuse
+  `_splitArtistTitle` + `_csvField` and the saved-tracks header; writes are
+  best-effort (errors swallowed), like metadata. The history is **unbounded** —
+  it grows one row per song until cleared.
+- **Logging toggle.** A `history_logging` bool (default on) gates recording. It's
+  toggled from the History view's control band (`_historyControls`, shown only
+  when `isHistory`), which also displays the entry count. `_recordHistory` reads
+  the pref **directly** and bails *before* updating `_lastHistoryTitle`, so
+  flipping logging back on mid-song still captures the current track. The History
+  page and the player both reach the flag through `shared_preferences`' single
+  cached instance, so the toggle takes effect immediately with no extra plumbing.
+- **Shared view (`_TrackListPage`).** History and saved tracks are the *same*
+  widget, differing only by `title` / `fileResolver` / `emptyMessage` /
+  `shareSubject` / `isHistory`. Sort, the desktop/compact layouts, type-to-search
+  (matching artist/title/station), export, and clear are therefore identical.
+  Export and clear always act on the whole file, not the filtered view; the entry
+  count is a snapshot taken when the view opens (no live refresh, like the rest of
+  this screen).
+
+### Filtering / type-to-search
+
+With a sizeable default list, the station list has a live name filter:
+
+- **Opening it.** On desktop the page body is wrapped in a `Focus` (`_pageFocus`,
+  `autofocus: true`) whose `onKeyEvent` (`_onPageKey`) catches the first
+  keystroke: a single printable character with **no** Ctrl/Alt/Meta held opens the
+  search bar seeded with that char (so the keypress isn't lost). Non-printable
+  keys (Enter, Tab, arrows, F-keys) and modifier combos are ignored, so shortcuts
+  still work. On mobile there's no hardware keyboard, so a **search** icon in the
+  app bar (`_openSearch`) is the entry point — it works on desktop too.
+- **The bar** (`_searchBar`) is a dense `TextField` shown above the list only
+  while `_searching`; it owns `_searchFocus` and updates `_query` on change.
+- **Matching** is case-insensitive substring on `Station.name`. While a query is
+  active the add/import/export action rows are hidden (so results are just
+  stations), and an empty result shows a muted "No stations match…" line.
+- **Dismissing.** A page-level `CallbackShortcuts` maps **Esc** → `_closeSearch`
+  (it resolves up the focus chain, so it fires even while the field is focused);
+  the bar's **✕** does the same. `_closeSearch` clears the query and returns focus
+  to `_pageFocus` so the next keystroke can re-open it.
+- Edit/delete/play key off `Station.url`, not list index, so operating on a
+  filtered view never touches the wrong station.
+
 ## Platform notes
 
 - **Desktop window title** (`linux/runner/my_application.cc`, and the Windows
@@ -197,7 +259,10 @@ requires `zenity`/`kdialog` at runtime.
 - Stations can be added/removed/edited but not **reordered**.
 - No URL validation beyond non-empty; a bad URL surfaces as a "Could not play"
   snackbar.
-- Saved-tracks view is a snapshot (no live refresh while open).
+- The saved-tracks and history views are snapshots (no live refresh while open);
+  the history entry count likewise reflects open-time.
+- Play history is **unbounded** — it grows until the user clears it (there's a
+  logging on/off toggle, but no automatic size cap or retention window).
 - The application ID is `io.github.flochrislas.eztunein` (Android `applicationId`
   + `namespace`, and the Linux GTK `APPLICATION_ID` — which determines the
   `shared_preferences` directory). The Dart **package** and the on-disk **binary**

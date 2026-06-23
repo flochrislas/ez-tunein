@@ -16,6 +16,11 @@ import 'package:window_manager/window_manager.dart';
 final _isDesktop = Platform.isLinux || Platform.isWindows || Platform.isMacOS;
 const _winWidthKey = 'win_w';
 const _winHeightKey = 'win_h';
+// Whether the player logs played songs to the history CSV. Toggled from the
+// History view, read by the player; defaults to on. Top-level so both screens
+// share it (shared_preferences returns one cached instance, so a write here is
+// immediately visible to the player without extra plumbing).
+const _historyLoggingKey = 'history_logging';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -62,15 +67,139 @@ class Station {
 
 // The list users start with on first launch; afterwards it's whatever they've
 // saved (see _stationsKey). Add/remove from the UI.
+// Sourced from radios-selection.csv — keep the two in sync if you curate the set.
 const _defaultStations = <Station>[
-  Station('SomaFM — Groove Salad', 'https://ice1.somafm.com/groovesalad-128-mp3'),
-  Station('SomaFM — Drone Zone', 'https://ice1.somafm.com/dronezone-128-mp3'),
-  Station('SomaFM — Secret Agent', 'https://ice1.somafm.com/secretagent-128-mp3'),
-  Station('SomaFM — Lush', 'https://ice1.somafm.com/lush-128-mp3'),
-  // Direct relay from swissgroove.ch's listen.php M3U (relay2 is a fallback).
+  // Direct relay from swissgroove.ch's listen.php M3U.
   Station('SwissGroove', 'http://relay1.swissgroove.ch:80'),
-  // Nightride FM (synthwave) — Icecast mount, 320 kbps MP3.
-  Station('Nightride FM', 'https://stream.nightride.fm/nightride.mp3'),
+  // Nightride FM — Icecast mounts, 320 kbps MP3.
+  Station('Nightride FM (Synthwave / Outrun)',
+      'https://stream.nightride.fm/nightride.mp3'),
+  Station('Nightride FM — Chillsynth',
+      'https://stream.nightride.fm/chillsynth.mp3'),
+  Station('Nightride FM — Datawave (Glitchy Retro Computing / IDM)',
+      'https://stream.nightride.fm/datawave.mp3'),
+  Station('Nightride FM — Darksynth (Cyberpunk / Synthmetal)',
+      'https://stream.nightride.fm/darksynth.mp3'),
+  Station('Nightride FM — Spacesynth (Space Disco / Italo)',
+      'https://stream.nightride.fm/spacesynth.mp3'),
+  Station('Nightride FM — Horrorsynth',
+      'https://stream.nightride.fm/horrorsynth.mp3'),
+  Station('Nightride FM — EBSM (Industrial / Electronic Body Synth Music)',
+      'https://stream.nightride.fm/ebsm.mp3'),
+  Station('Rekt Network — Rekt (Drum & Bass / EDM)',
+      'https://stream.nightride.fm/rekt.mp3'),
+  Station('Rekt Network — Rektory (1930s Fallout-style Jazz)',
+      'https://stream.nightride.fm/rektory.mp3'),
+  Station(
+      'SomaFM — Groove Salad', 'http://ice5.somafm.com/groovesalad-128-mp3'),
+  Station('SomaFM — Drone Zone', 'http://ice5.somafm.com/dronezone-128-mp3'),
+  Station(
+      'SomaFM — Deep Space One', 'http://ice5.somafm.com/deepspaceone-128-mp3'),
+  Station('SomaFM — Space Station Soma',
+      'http://ice5.somafm.com/spacestation-128-mp3'),
+  Station('SomaFM — The Dark Zone', 'http://ice5.somafm.com/darkzone-128-mp3'),
+  Station(
+      'SomaFM — Beat Blender', 'http://ice5.somafm.com/beatblender-128-mp3'),
+  Station('SomaFM — Vaporwaves', 'http://ice5.somafm.com/vaporwaves-128-mp3'),
+  Station('SomaFM — Underground 80s', 'http://ice5.somafm.com/u80s-128-mp3'),
+  Station('SomaFM — Lush', 'http://ice5.somafm.com/lush-128-mp3'),
+  Station('SomaFM — The Trip', 'http://ice5.somafm.com/thetrip-128-mp3'),
+  Station(
+      'SomaFM — Suburbs of Goa', 'http://ice5.somafm.com/suburbsofgoa-128-mp3'),
+  Station('SomaFM — DEF CON Radio', 'http://ice5.somafm.com/defcon-128-mp3'),
+  Station('SomaFM — Mission Control',
+      'http://ice5.somafm.com/missioncontrol-128-mp3'),
+  Station(
+      'SomaFM — Secret Agent', 'http://ice5.somafm.com/secretagent-128-mp3'),
+  Station(
+      'SomaFM — Indie Pop Rocks!', 'http://ice5.somafm.com/indiepop-128-mp3'),
+  Station('Funky Radio (Classic Uncut Funk) — 320kbps MP3',
+      'https://funkyradio.streamingmedia.it/play.mp3'),
+  Station('Funky Radio (Classic Uncut Funk) — 192kbps AAC',
+      'https://funkyradio.streamingmedia.it/audio.aac'),
+  Station('WEFUNK Radio — 128kbps MP3',
+      'http://stream.wefunkradio.com:8000/wefunk'),
+  Station('Funky Corner Radio — 128kbps MP3',
+      'http://icecast.unitedradio.it/FunkyCornerRadio'),
+  Station('B4B Disco Funk — 128kbps MP3',
+      'http://b4b-disco-funk.ice.infomaniak.ch/b4b-disco-funk-128.mp3'),
+  Station('Radio Meuh — 128kbps MP3',
+      'http://radiomeuh.ice.infomaniak.ch/radiomeuh-128.mp3'),
+  Station('Classic Rock Replay (1.FM) — 192kbps MP3',
+      'http://185.33.21.112:80/crock_64a'),
+  Station(
+      'Progulus Radio — 192kbps MP3', 'http://stream.progulus.com:8000/live'),
+  Station('Morow — 128kbps MP3', 'http://stream.morow.com:8080/morow_med.mp3'),
+  Station('Radio BOB! Prog-Rock — 192kbps MP3',
+      'http://streams.radiobob.de/progrock/mp3-192/homepage'),
+  Station('St. Louis Classic Rock — 256kbps MP3',
+      'http://74.208.89.18:8000/SLCR4_highdef.mp3'),
+  Station('Radio BOB! Grunge — 192kbps MP3',
+      'https://streams.radiobob.de/bob-grunge/mp3-192/'),
+  Station('Radio BOB! Punk — 192kbps MP3',
+      'https://streams.radiobob.de/bob-punk/mp3-192/'),
+  Station('Prog Rock and Metal (PRM) — 128kbps MP3',
+      'http://149.56.234.138:8025/stream'),
+  Station('Proteus Radio — 128kbps MP3',
+      'https://proteusradio.ddns.net:9900/proteus.mp3'),
+  Station('Radio BOB! Power Metal — 192kbps MP3',
+      'https://streams.radiobob.de/powermetal/mp3-192/'),
+  Station('Radio BOB! Symphonic Metal — 192kbps MP3',
+      'https://streams.radiobob.de/symphonicmetal/mp3-192/'),
+  Station("Mouv' (Radio France) — 128kbps MP3",
+      'https://direct.mouv.fr/live/mouv-midfi.mp3'),
+  Station(
+      'Skyrock — 128kbps MP3', 'http://icecast.skyrock.net/s/natio_mp3_128k'),
+  Station('Générations — 128kbps MP3',
+      'http://broadcast.infomaniak.net/generationfm-high.mp3'),
+  Station('J-Pop Powerplay — 128kbps MP3',
+      'https://kathy.torontocast.com:3560/stream'),
+  Station('J-Rock Powerplay — 128kbps MP3',
+      'https://kathy.torontocast.com:3340/stream'),
+  Station('J-Pop Powerplay Kawaii — 128kbps MP3',
+      'https://kathy.torontocast.com:3060/stream'),
+  Station('AnimeNfo Radio (Zeno Mirror) — 128kbps MP3',
+      'https://stream.zeno.fm/xwa8ckz7mzzuv'),
+  Station('Eurobeat FM — 128kbps MP3', 'https://stream.laut.fm/eurobeat'),
+  Station('Radio BOB! Gaming Rock — 192kbps MP3',
+      'https://streams.radiobob.de/gamingrock/mp3-192/'),
+  Station('SLAY Radio (Retro Gaming) — 128kbps AAC',
+      'http://relay1.slayradio.org:8000/'),
+  Station(
+      'Bigbeat-Radio — 128kbps MP3', 'https://stream.laut.fm/bigbeat-radio'),
+  Station('Record Breakbeat — 128kbps MP3',
+      'http://air2.radiorecord.ru:805/brb_128'),
+  Station('Joint Radio Reggae — 128kbps MP3',
+      'http://radio.jointil.net:9998/stream'),
+  Station('Skafari — 128kbps MP3', 'https://stream.laut.fm/skafari'),
+  Station('Ruffneck Smille — 128kbps MP3',
+      'https://stream.laut.fm/ruffneck-smille'),
+  Station('Radio Swiss Classic (French) — 128kbps MP3',
+      'http://stream.srg-ssr.ch/m/rsc_fr/mp3_128'),
+  Station('Radio Swiss Classic (German) — 128kbps MP3',
+      'http://stream.srg-ssr.ch/m/rsc_de/mp3_128'),
+  Station('WQXR Classical — 128kbps MP3', 'http://stream.wqxr.org/wqxr'),
+  Station('FIP Sacré Français ! — 128kbps MP3',
+      'https://icecast.radiofrance.fr/fipsacrefrancais-midfi.mp3'),
+  Station('Chante France — 128kbps MP3',
+      'http://chantefrance.ice.infomaniak.ch/chantefrance-128.mp3'),
+  Station('Dubstep.fm — 256kbps MP3', 'http://stream.dubstep.fm/256mp3'),
+  Station('Dubstep.fm — 128kbps MP3', 'http://stream.dubstep.fm/128mp3'),
+  Station('Best of Trap — 128kbps MP3', 'https://stream.laut.fm/bestoftrap'),
+  Station('Neverdie Radio (Dubstep) — 128kbps MP3',
+      'https://stream.laut.fm/neverdie-radio'),
+  Station('Radio BOB! Nu Metal — 192kbps MP3',
+      'https://streams.radiobob.de/numetal/mp3-192/'),
+  Station('Radio BOB! Rap Metal — 192kbps MP3',
+      'https://streams.radiobob.de/rapmetal/mp3-192/'),
+  Station('Radio BOB! Alternative — 192kbps MP3',
+      'https://streams.radiobob.de/alternative/mp3-192/'),
+  Station('Celtic Music Radio (Glasgow) — 128kbps MP3',
+      'http://stream.celticmusicradio.net:8000/celticmusic.mp3'),
+  Station('SomaFM — Folk Forward — 128kbps MP3',
+      'http://ice5.somafm.com/folkfwd-128-mp3'),
+  Station(
+      'RTÉ Raidió na Gaeltachta — 128kbps MP3', 'https://icecast.rte.ie/rnag'),
 ];
 
 class RadioApp extends StatelessWidget {
@@ -112,6 +241,19 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   bool _loading = false;
   String _nowPlaying = ''; // raw "Artist - Title" string from the stream
   double _volume = 1.0; // 0.0–1.0
+  // Last title written to the play history; the ICY reader re-emits the same
+  // title every metadata tick, so we dedup against this to log a song once.
+  String _lastHistoryTitle = '';
+
+  // Type-to-search filter over station names. On desktop, typing a printable
+  // character while the page is focused opens the search bar; on mobile the
+  // app-bar magnifier does. Matching is case-insensitive substring on the name.
+  String _query = '';
+  bool _searching = false;
+  final _searchController = TextEditingController();
+  final _searchFocus = FocusNode(); // the search TextField
+  // Holds keyboard focus when not searching so we can catch the first keystroke.
+  final _pageFocus = FocusNode();
 
   @override
   void initState() {
@@ -120,6 +262,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     _icy.onTitle = (title) {
       if (!mounted) return;
       setState(() => _nowPlaying = title);
+      _recordHistory(title);
     };
     _restorePrefs();
   }
@@ -317,9 +460,56 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   void dispose() {
     _resizeDebounce?.cancel();
     if (_isDesktop) windowManager.removeListener(this);
+    _searchController.dispose();
+    _searchFocus.dispose();
+    _pageFocus.dispose();
     _player.dispose();
     _icy.stop();
     super.dispose();
+  }
+
+  /// Open the search bar, optionally seeding it with the first typed character,
+  /// and move keyboard focus into the field.
+  void _openSearch({String? seed}) {
+    setState(() {
+      _searching = true;
+      if (seed != null) {
+        _searchController.text = seed;
+        _searchController.selection =
+            TextSelection.collapsed(offset: seed.length);
+        _query = seed;
+      }
+    });
+    _searchFocus.requestFocus();
+  }
+
+  /// Clear the query and dismiss the search bar, returning focus to the page so
+  /// the next keystroke can re-open it.
+  void _closeSearch() {
+    setState(() {
+      _searching = false;
+      _query = '';
+      _searchController.clear();
+    });
+    _pageFocus.requestFocus();
+  }
+
+  // First keystroke handler: when not already searching, a printable character
+  // (with no Ctrl/Alt/Meta held) opens the search bar seeded with that char.
+  KeyEventResult _onPageKey(FocusNode _, KeyEvent event) {
+    if (_searching || event is! KeyDownEvent) return KeyEventResult.ignored;
+    if (HardwareKeyboard.instance.isControlPressed ||
+        HardwareKeyboard.instance.isAltPressed ||
+        HardwareKeyboard.instance.isMetaPressed) {
+      return KeyEventResult.ignored;
+    }
+    final ch = event.character;
+    // A single printable, non-control character (filters out Enter, Tab, etc.).
+    if (ch == null || ch.length != 1 || ch.codeUnitAt(0) < 0x20) {
+      return KeyEventResult.ignored;
+    }
+    _openSearch(seed: ch);
+    return KeyEventResult.handled;
   }
 
   Future<void> _play(Station station) async {
@@ -327,6 +517,8 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
       _current = station;
       _loading = true;
       _nowPlaying = '';
+      _lastHistoryTitle =
+          ''; // new session: let the first song log even if same
     });
     try {
       await _player.setUrl(station.url);
@@ -357,7 +549,40 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     setState(() {
       _current = null;
       _nowPlaying = '';
+      _lastHistoryTitle = '';
     });
+  }
+
+  /// Append a song to the play history the first time we see its title for the
+  /// current session. Fires from [IcyReader.onTitle] (which re-emits the same
+  /// title each metadata tick — hence the dedup). Best-effort, like metadata.
+  Future<void> _recordHistory(String rawTitle) async {
+    final station = _current;
+    if (station == null || rawTitle.isEmpty || rawTitle == _lastHistoryTitle) {
+      return;
+    }
+    // Logging can be turned off from the History view. Bail before updating
+    // _lastHistoryTitle so re-enabling mid-song still logs the current track.
+    if (!(_prefs?.getBool(_historyLoggingKey) ?? true)) return;
+    _lastHistoryTitle = rawTitle;
+    final parts = _splitArtistTitle(rawTitle);
+    final row = [
+      DateTime.now().toIso8601String(),
+      station.name,
+      parts.artist,
+      parts.title,
+      '', // album (not available from ICY)
+      rawTitle, // raw, as a fallback
+    ].map(_csvField).join(',');
+    try {
+      final file = await historyFile();
+      if (!await file.exists()) {
+        await file.writeAsString('timestamp,station,artist,title,album,raw\n');
+      }
+      await file.writeAsString('$row\n', mode: FileMode.append);
+    } catch (_) {
+      // History is a best-effort log — ignore write failures.
+    }
   }
 
   Future<void> _saveCurrentTrack() async {
@@ -368,13 +593,9 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
 
     // ICY only gives us "Artist - Title". Album is rarely present, so it stays
     // empty unless you later add a per-station metadata source.
-    var artist = '';
-    var title = _nowPlaying;
-    final sep = _nowPlaying.indexOf(' - ');
-    if (sep > 0) {
-      artist = _nowPlaying.substring(0, sep).trim();
-      title = _nowPlaying.substring(sep + 3).trim();
-    }
+    final parts = _splitArtistTitle(_nowPlaying);
+    final artist = parts.artist;
+    final title = parts.title;
 
     final row = [
       DateTime.now().toIso8601String(),
@@ -409,10 +630,8 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   /// A dimmed, italic list row that reads as an action rather than a station
   /// entry (used for add / import / export at the end of the list).
   Widget _actionTile(IconData icon, String label, VoidCallback onTap) {
-    final muted = Theme.of(context)
-        .colorScheme
-        .onSurfaceVariant
-        .withValues(alpha: 0.55);
+    final muted =
+        Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.55);
     return ListTile(
       leading: Icon(icon, color: muted),
       title: Text(
@@ -423,120 +642,211 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     );
   }
 
+  /// The live filter field, shown above the station list while [_searching].
+  Widget _searchBar() {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: TextField(
+        controller: _searchController,
+        focusNode: _searchFocus,
+        autofocus: true,
+        onChanged: (v) => setState(() => _query = v),
+        textInputAction: TextInputAction.search,
+        decoration: InputDecoration(
+          isDense: true,
+          prefixIcon: const Icon(Icons.search),
+          hintText: 'Filter stations…',
+          border: const OutlineInputBorder(),
+          suffixIcon: IconButton(
+            icon: const Icon(Icons.close),
+            tooltip: 'Clear search',
+            onPressed: _closeSearch,
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final playing = _current != null;
+    // Case-insensitive substring match on the station name.
+    final visible = _query.isEmpty
+        ? _stations
+        : _stations
+            .where((s) => s.name.toLowerCase().contains(_query.toLowerCase()))
+            .toList();
     return Scaffold(
       appBar: AppBar(
         title: const Text('EZ-TuneIn Radio'),
         actions: [
           IconButton(
+            icon: const Icon(Icons.search),
+            tooltip: 'Filter stations',
+            onPressed: _openSearch,
+          ),
+          IconButton(
+            icon: const Icon(Icons.history),
+            tooltip: 'History',
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => const _TrackListPage(
+                  title: 'History',
+                  fileResolver: historyFile,
+                  emptyMessage: 'No songs played yet.',
+                  shareSubject: 'EZ-TuneIn play history',
+                  isHistory: true,
+                ),
+              ),
+            ),
+          ),
+          IconButton(
             icon: const Icon(Icons.queue_music),
             tooltip: 'Saved tracks',
             onPressed: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(builder: (_) => const SavedTracksPage()),
+              MaterialPageRoute<void>(
+                builder: (_) => const _TrackListPage(
+                  title: 'Saved tracks',
+                  fileResolver: savedTracksFile,
+                  emptyMessage: 'No saved tracks yet.',
+                  shareSubject: 'EZ-TuneIn saved tracks',
+                ),
+              ),
             ),
           ),
         ],
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // Volume
-            Row(
+      // Esc dismisses the filter from anywhere (incl. while the field is
+      // focused); the page-level Focus catches the first keystroke to open it.
+      body: CallbackShortcuts(
+        bindings: {
+          const SingleActivator(LogicalKeyboardKey.escape): _closeSearch,
+        },
+        child: Focus(
+          focusNode: _pageFocus,
+          autofocus: true,
+          onKeyEvent: _onPageKey,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Icon(
-                  _volume == 0
-                      ? Icons.volume_off
-                      : (_volume < 0.5 ? Icons.volume_down : Icons.volume_up),
-                ),
-                Expanded(
-                  child: Slider(
-                    value: _volume,
-                    onChanged: _setVolume,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            // Now playing
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(20),
-                child: Column(
+                // Volume
+                Row(
                   children: [
-                    Text(
-                      playing ? _current!.name : 'Stopped',
-                      style: Theme.of(context).textTheme.titleMedium,
+                    Icon(
+                      _volume == 0
+                          ? Icons.volume_off
+                          : (_volume < 0.5
+                              ? Icons.volume_down
+                              : Icons.volume_up),
                     ),
-                    const SizedBox(height: 8),
-                    Text(
-                      _loading
-                          ? 'Connecting…'
-                          : (_nowPlaying.isEmpty
-                              ? (playing ? 'Waiting for track info…' : '—')
-                              : _nowPlaying),
-                      style: Theme.of(context).textTheme.headlineSmall,
-                      textAlign: TextAlign.center,
+                    Expanded(
+                      child: Slider(
+                        value: _volume,
+                        onChanged: _setVolume,
+                      ),
                     ),
                   ],
                 ),
-              ),
-            ),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                if (playing)
-                  Expanded(
-                    child: FilledButton.tonalIcon(
-                      onPressed: _stop,
-                      icon: const Icon(Icons.stop),
-                      label: const Text('Stop'),
+                const SizedBox(height: 8),
+                // Now playing
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(20),
+                    child: Column(
+                      children: [
+                        Text(
+                          playing ? _current!.name : 'Stopped',
+                          style: Theme.of(context).textTheme.titleMedium,
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          _loading
+                              ? 'Connecting…'
+                              : (_nowPlaying.isEmpty
+                                  ? (playing ? 'Waiting for track info…' : '—')
+                                  : _nowPlaying),
+                          style: Theme.of(context).textTheme.headlineSmall,
+                          textAlign: TextAlign.center,
+                        ),
+                      ],
                     ),
                   ),
-                if (playing) const SizedBox(width: 12),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    if (playing)
+                      Expanded(
+                        child: FilledButton.tonalIcon(
+                          onPressed: _stop,
+                          icon: const Icon(Icons.stop),
+                          label: const Text('Stop'),
+                        ),
+                      ),
+                    if (playing) const SizedBox(width: 12),
+                    Expanded(
+                      child: FilledButton.icon(
+                        onPressed: _saveCurrentTrack,
+                        icon: const Icon(Icons.bookmark_add),
+                        label: const Text('Save current track'),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                const Divider(),
+                if (_searching) _searchBar(),
                 Expanded(
-                  child: FilledButton.icon(
-                    onPressed: _saveCurrentTrack,
-                    icon: const Icon(Icons.bookmark_add),
-                    label: const Text('Save current track'),
-                  ),
+                  child: (_query.isNotEmpty && visible.isEmpty)
+                      ? Center(
+                          child: Text(
+                            'No stations match “$_query”.',
+                            style: TextStyle(
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onSurfaceVariant,
+                              fontStyle: FontStyle.italic,
+                            ),
+                          ),
+                        )
+                      : ListView.builder(
+                          // Trailing add/import/export rows only when not filtering,
+                          // so a query shows just the matching stations.
+                          itemCount: visible.length + (_query.isEmpty ? 3 : 0),
+                          itemBuilder: (context, i) {
+                            if (_query.isEmpty) {
+                              switch (i - visible.length) {
+                                case 0:
+                                  return _actionTile(Icons.add,
+                                      'Add a new radio station…', _addStation);
+                                case 1:
+                                  return _actionTile(
+                                      Icons.file_download_outlined,
+                                      'Import stations from CSV…',
+                                      _importStations);
+                                case 2:
+                                  return _actionTile(
+                                      Icons.file_upload_outlined,
+                                      'Export stations to CSV…',
+                                      _exportStations);
+                              }
+                            }
+                            final s = visible[i];
+                            return _StationTile(
+                              station: s,
+                              isCurrent: _current?.url == s.url,
+                              onTap: () => _play(s),
+                              onEdit: () => _editStation(s),
+                              onDelete: () => _removeStation(s),
+                            );
+                          },
+                        ),
                 ),
               ],
             ),
-            const SizedBox(height: 16),
-            const Divider(),
-            Expanded(
-              child: ListView.builder(
-                // Three trailing action rows after the stations: add, import,
-                // export.
-                itemCount: _stations.length + 3,
-                itemBuilder: (context, i) {
-                  switch (i - _stations.length) {
-                    case 0:
-                      return _actionTile(
-                          Icons.add, 'Add a new radio station…', _addStation);
-                    case 1:
-                      return _actionTile(Icons.file_download_outlined,
-                          'Import stations from CSV…', _importStations);
-                    case 2:
-                      return _actionTile(Icons.file_upload_outlined,
-                          'Export stations to CSV…', _exportStations);
-                  }
-                  final s = _stations[i];
-                  return _StationTile(
-                    station: s,
-                    isCurrent: _current?.url == s.url,
-                    onTap: () => _play(s),
-                    onEdit: () => _editStation(s),
-                    onDelete: () => _removeStation(s),
-                  );
-                },
-              ),
-            ),
-          ],
+          ),
         ),
       ),
     );
@@ -677,6 +987,26 @@ Future<File> savedTracksFile() async {
   return File('${dir.path}/radio_saved_tracks.csv');
 }
 
+/// The CSV file where every played song is logged automatically. Same format as
+/// the saved-tracks CSV; written by the player, read/cleared by the history view.
+Future<File> historyFile() async {
+  final dir = await getApplicationDocumentsDirectory();
+  return File('${dir.path}/radio_history.csv');
+}
+
+/// Split a raw ICY "Artist - Title" string on the first " - "; if there's no
+/// separator the whole string is the title and the artist is empty.
+({String artist, String title}) _splitArtistTitle(String raw) {
+  final sep = raw.indexOf(' - ');
+  if (sep > 0) {
+    return (
+      artist: raw.substring(0, sep).trim(),
+      title: raw.substring(sep + 3).trim(),
+    );
+  }
+  return (artist: '', title: raw);
+}
+
 /// One saved track. [timestamp] is kept as the raw ISO-8601 string (which sorts
 /// chronologically as plain text).
 class SavedTrack {
@@ -687,19 +1017,47 @@ class SavedTrack {
   final String title;
 }
 
-/// A dark, sortable table of saved tracks. Tap a row to copy "artist - title".
-class SavedTracksPage extends StatefulWidget {
-  const SavedTracksPage({super.key});
+/// A dark, sortable, searchable table of tracks read from a CSV file. Used for
+/// both the saved-tracks list and the auto-recorded play history — they differ
+/// only in which file they read and their labels. Tap a row to copy
+/// "artist - title"; type (or tap the search icon) to filter by artist / title /
+/// station; sort by any column; export or clear the whole file.
+class _TrackListPage extends StatefulWidget {
+  const _TrackListPage({
+    required this.title,
+    required this.fileResolver,
+    required this.emptyMessage,
+    required this.shareSubject,
+    this.isHistory = false,
+  });
+
+  final String title;
+  final Future<File> Function() fileResolver;
+  final String emptyMessage;
+  final String shareSubject;
+  // History gets an extra control bar (entry count + a logging on/off toggle).
+  final bool isHistory;
 
   @override
-  State<SavedTracksPage> createState() => _SavedTracksPageState();
+  State<_TrackListPage> createState() => _TrackListPageState();
 }
 
-class _SavedTracksPageState extends State<SavedTracksPage> {
+class _TrackListPageState extends State<_TrackListPage> {
   List<SavedTrack> _tracks = [];
   bool _loading = true;
   int? _sortColumn;
   bool _ascending = true;
+
+  // Type-to-search filter (same UX as the station list): matches artist, title,
+  // or station, case-insensitive substring.
+  String _query = '';
+  bool _searching = false;
+  final _searchController = TextEditingController();
+  final _searchFocus = FocusNode();
+  final _pageFocus = FocusNode();
+
+  // History only: whether the player is currently logging played songs.
+  bool _logging = true;
 
   @override
   void initState() {
@@ -707,8 +1065,16 @@ class _SavedTracksPageState extends State<SavedTracksPage> {
     _load();
   }
 
+  @override
+  void dispose() {
+    _searchController.dispose();
+    _searchFocus.dispose();
+    _pageFocus.dispose();
+    super.dispose();
+  }
+
   Future<void> _load() async {
-    final file = await savedTracksFile();
+    final file = await widget.fileResolver();
     final tracks = <SavedTrack>[];
     if (await file.exists()) {
       final rows = _parseCsv(await file.readAsString());
@@ -718,11 +1084,130 @@ class _SavedTracksPageState extends State<SavedTracksPage> {
         tracks.add(SavedTrack(r[0], r[1], r[2], r[3]));
       }
     }
+    var logging = true;
+    if (widget.isHistory) {
+      final prefs = await SharedPreferences.getInstance();
+      logging = prefs.getBool(_historyLoggingKey) ?? true;
+    }
     if (!mounted) return;
     setState(() {
       _tracks = tracks;
       _loading = false;
+      _logging = logging;
     });
+  }
+
+  Future<void> _setLogging(bool value) async {
+    setState(() => _logging = value);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_historyLoggingKey, value);
+  }
+
+  /// History-only band: how many songs are logged + a switch to pause/resume
+  /// logging. Shown even when the list is empty so logging can be toggled first.
+  Widget _historyControls(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final n = _tracks.length;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+          child: Row(
+            children: [
+              Icon(Icons.history, size: 18, color: scheme.onSurfaceVariant),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  '$n ${n == 1 ? 'entry' : 'entries'} logged',
+                  style: TextStyle(color: scheme.onSurfaceVariant),
+                ),
+              ),
+              Text(
+                _logging ? 'Logging on' : 'Logging off',
+                style: TextStyle(color: scheme.onSurfaceVariant),
+              ),
+              Switch(value: _logging, onChanged: _setLogging),
+            ],
+          ),
+        ),
+        const Divider(height: 1),
+      ],
+    );
+  }
+
+  /// The rows actually shown: the full list, or those matching the query on
+  /// artist / title / station (case-insensitive substring).
+  List<SavedTrack> get _visible {
+    if (_query.isEmpty) return _tracks;
+    final q = _query.toLowerCase();
+    return _tracks
+        .where((t) =>
+            t.artist.toLowerCase().contains(q) ||
+            t.title.toLowerCase().contains(q) ||
+            t.station.toLowerCase().contains(q))
+        .toList();
+  }
+
+  void _openSearch({String? seed}) {
+    setState(() {
+      _searching = true;
+      if (seed != null) {
+        _searchController.text = seed;
+        _searchController.selection =
+            TextSelection.collapsed(offset: seed.length);
+        _query = seed;
+      }
+    });
+    _searchFocus.requestFocus();
+  }
+
+  void _closeSearch() {
+    setState(() {
+      _searching = false;
+      _query = '';
+      _searchController.clear();
+    });
+    _pageFocus.requestFocus();
+  }
+
+  KeyEventResult _onPageKey(FocusNode _, KeyEvent event) {
+    if (_searching || event is! KeyDownEvent) return KeyEventResult.ignored;
+    if (HardwareKeyboard.instance.isControlPressed ||
+        HardwareKeyboard.instance.isAltPressed ||
+        HardwareKeyboard.instance.isMetaPressed) {
+      return KeyEventResult.ignored;
+    }
+    final ch = event.character;
+    if (ch == null || ch.length != 1 || ch.codeUnitAt(0) < 0x20) {
+      return KeyEventResult.ignored;
+    }
+    _openSearch(seed: ch);
+    return KeyEventResult.handled;
+  }
+
+  Widget _searchBar() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+      child: TextField(
+        controller: _searchController,
+        focusNode: _searchFocus,
+        autofocus: true,
+        onChanged: (v) => setState(() => _query = v),
+        textInputAction: TextInputAction.search,
+        decoration: InputDecoration(
+          isDense: true,
+          prefixIcon: const Icon(Icons.search),
+          hintText: 'Filter by artist, title or station…',
+          border: const OutlineInputBorder(),
+          suffixIcon: IconButton(
+            icon: const Icon(Icons.close),
+            tooltip: 'Clear search',
+            onPressed: _closeSearch,
+          ),
+        ),
+      ),
+    );
   }
 
   void _onSort(int columnIndex, bool ascending) {
@@ -755,18 +1240,18 @@ class _SavedTracksPageState extends State<SavedTracksPage> {
       ..showSnackBar(SnackBar(content: Text('Copied: $text')));
   }
 
-  /// Get the saved-tracks CSV off the device. On mobile this hands the file to
-  /// the OS share sheet (email, Quick Share, Drive, Save to Files…). On desktop
-  /// the file already lives in the user's Documents folder, so instead we point
-  /// them at it: copy the path and offer to open the containing folder.
+  /// Get the CSV off the device. On mobile this hands the file to the OS share
+  /// sheet (email, Quick Share, Drive, Save to Files…). On desktop the file
+  /// already lives in the user's Documents folder, so instead we point them at
+  /// it: copy the path and offer to open the containing folder. Always exports
+  /// the whole file, not the filtered view.
   Future<void> _export() async {
-    final file = await savedTracksFile();
+    final file = await widget.fileResolver();
     if (_tracks.isEmpty || !await file.exists()) {
       if (!mounted) return;
       ScaffoldMessenger.of(context)
         ..clearSnackBars()
-        ..showSnackBar(
-            const SnackBar(content: Text('No saved tracks to export yet.')));
+        ..showSnackBar(const SnackBar(content: Text('Nothing to export yet.')));
       return;
     }
     if (_isDesktop) {
@@ -784,7 +1269,7 @@ class _SavedTracksPageState extends State<SavedTracksPage> {
     } else {
       await SharePlus.instance.share(ShareParams(
         files: [XFile(file.path, mimeType: 'text/csv')],
-        subject: 'EZ-TuneIn saved tracks',
+        subject: widget.shareSubject,
       ));
     }
   }
@@ -809,8 +1294,8 @@ class _SavedTracksPageState extends State<SavedTracksPage> {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Clear all saved tracks?'),
-        content: const Text('This permanently deletes every saved entry.'),
+        title: Text('Clear all of ${widget.title.toLowerCase()}?'),
+        content: const Text('This permanently deletes every entry.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(false),
@@ -824,7 +1309,7 @@ class _SavedTracksPageState extends State<SavedTracksPage> {
       ),
     );
     if (ok != true) return;
-    final file = await savedTracksFile();
+    final file = await widget.fileResolver();
     if (await file.exists()) {
       await file.writeAsString('timestamp,station,artist,title,album,raw\n');
     }
@@ -834,7 +1319,7 @@ class _SavedTracksPageState extends State<SavedTracksPage> {
 
   /// Desktop layout: the full sortable table (a wide window can scroll if it
   /// ever needs to).
-  Widget _buildDataTable() {
+  Widget _buildDataTable(List<SavedTrack> rows) {
     return SingleChildScrollView(
       scrollDirection: Axis.vertical,
       child: SingleChildScrollView(
@@ -844,13 +1329,13 @@ class _SavedTracksPageState extends State<SavedTracksPage> {
           sortAscending: _ascending,
           showCheckboxColumn: false,
           columns: [
-            DataColumn(label: const Text('Saved at'), onSort: _onSort),
+            DataColumn(label: const Text('When'), onSort: _onSort),
             DataColumn(label: const Text('Radio station'), onSort: _onSort),
             DataColumn(label: const Text('Artist'), onSort: _onSort),
             DataColumn(label: const Text('Title'), onSort: _onSort),
           ],
           rows: [
-            for (final t in _tracks)
+            for (final t in rows)
               DataRow(
                 onSelectChanged: (_) => _copy(t),
                 cells: [
@@ -869,13 +1354,13 @@ class _SavedTracksPageState extends State<SavedTracksPage> {
   /// Phone layout: a vertical list that never scrolls horizontally. Each row
   /// stacks "Artist — Title" over a muted "station · date" line; tapping copies
   /// "artist - title" (same as a table-row tap). Sorting is via the app-bar menu.
-  Widget _buildCompactList(BuildContext context) {
+  Widget _buildCompactList(BuildContext context, List<SavedTrack> rows) {
     final scheme = Theme.of(context).colorScheme;
     return ListView.separated(
-      itemCount: _tracks.length,
+      itemCount: rows.length,
       separatorBuilder: (_, __) => const Divider(height: 1),
       itemBuilder: (context, i) {
-        final t = _tracks[i];
+        final t = rows[i];
         final headline =
             t.artist.isEmpty ? t.title : '${t.artist} — ${t.title}';
         return ListTile(
@@ -907,8 +1392,13 @@ class _SavedTracksPageState extends State<SavedTracksPage> {
       ),
       child: Scaffold(
         appBar: AppBar(
-          title: const Text('Saved tracks'),
+          title: Text(widget.title),
           actions: [
+            IconButton(
+              icon: const Icon(Icons.search),
+              tooltip: 'Filter',
+              onPressed: _tracks.isEmpty ? null : _openSearch,
+            ),
             // The compact phone list has no column headers, so sorting moves
             // here. (record = (columnIndex, ascending) — see _onSort.)
             if (!_isDesktop)
@@ -937,15 +1427,51 @@ class _SavedTracksPageState extends State<SavedTracksPage> {
             ),
           ],
         ),
-        body: _loading
-            ? const Center(child: CircularProgressIndicator())
-            : _tracks.isEmpty
-                ? const Center(child: Text('No saved tracks yet.'))
-                : _isDesktop
-                    ? _buildDataTable()
-                    : _buildCompactList(context),
+        // Esc dismisses the filter; the page-level Focus catches the first
+        // keystroke to open it (same type-to-search UX as the station list).
+        body: CallbackShortcuts(
+          bindings: {
+            const SingleActivator(LogicalKeyboardKey.escape): _closeSearch,
+          },
+          child: Focus(
+            focusNode: _pageFocus,
+            autofocus: true,
+            onKeyEvent: _onPageKey,
+            child: _buildBody(context),
+          ),
+        ),
       ),
     );
+  }
+
+  Widget _buildBody(BuildContext context) {
+    if (_loading) return const Center(child: CircularProgressIndicator());
+    return Column(
+      children: [
+        if (widget.isHistory) _historyControls(context),
+        if (_searching) _searchBar(),
+        Expanded(child: _buildListArea(context)),
+      ],
+    );
+  }
+
+  Widget _buildListArea(BuildContext context) {
+    if (_tracks.isEmpty) return Center(child: Text(widget.emptyMessage));
+    final visible = _visible;
+    if (visible.isEmpty) {
+      return Center(
+        child: Text(
+          'No entries match “$_query”.',
+          style: TextStyle(
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+            fontStyle: FontStyle.italic,
+          ),
+        ),
+      );
+    }
+    return _isDesktop
+        ? _buildDataTable(visible)
+        : _buildCompactList(context, visible);
   }
 }
 
@@ -1095,7 +1621,8 @@ class IcyReader {
 
   void _emit(List<int> bytes) {
     // Strip the null/space padding the server appends after the fields.
-    final text = utf8.decode(bytes, allowMalformed: true).replaceAll('\x00', '');
+    final text =
+        utf8.decode(bytes, allowMalformed: true).replaceAll('\x00', '');
     // Prefer anchoring the end on the next field (StreamUrl=) so a title that
     // itself contains "';" isn't cut short; fall back to a plain match.
     final match = RegExp("StreamTitle='(.*?)';StreamUrl=").firstMatch(text) ??

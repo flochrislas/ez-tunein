@@ -101,8 +101,12 @@ the binary to confirm runtime behaviour (audio/UI can't be observed here).
 - **Metadata is decoupled from playback on purpose.** `just_audio`'s `icyMetadataStream` does NOT work on Windows/Linux, so the app parses ICY itself in `IcyReader`. Do not "simplify" by switching to `icyMetadataStream`. See `doc/implementation-notes.md`.
 - **Never `await player.play()`** for these endless streams — its Future only completes when playback *ends*, so awaiting it hangs `_play()` (was invisible on desktop's media_kit backend, broke Android/ExoPlayer). Use `unawaited(_player.play())`. See `doc/android-build.md`.
 - **Stream URLs must be direct**, not `.pls`/`.m3u` playlist links (unwrap them first — e.g. SwissGroove's `listen.php` → `relay1.swissgroove.ch:80`).
-- **Persistence:** `shared_preferences` keys are `volume`, `stations`, `win_w`, `win_h`. Saved tracks are a CSV in the app documents dir (`savedTracksFile()`); read/write with `_parseCsv` / `_csvField` (RFC-4180, no extra dependency).
+- **Persistence:** `shared_preferences` keys are `volume`, `stations`, `win_w`, `win_h`, `history_logging`. Saved tracks (`savedTracksFile()`) and play history (`historyFile()`) are two CSVs in the app documents dir with the **same** `timestamp,station,artist,title,album,raw` header; read/write with `_parseCsv` / `_csvField` (RFC-4180, no extra dependency).
+- **Play history:** the player auto-logs each played song via `_recordHistory` (called from `IcyReader.onTitle`). It dedups against `_lastHistoryTitle` (the ICY reader re-emits the same title every metadata tick) — reset on `_play`/`_stop`. Logging is gated by the `history_logging` pref (default on), toggled from the History view; `_recordHistory` reads the pref directly and bails *before* updating the dedup marker so re-enabling mid-song still logs the current track. Writes are best-effort (errors swallowed), like metadata. **Don't** switch the dedup to `icyMetadataStream` (see metadata note above).
+- **Saved-tracks & History share one widget** (`_TrackListPage`, parameterized by `title` / `fileResolver` / `emptyMessage` / `shareSubject` / `isHistory`): sortable `DataTable` on desktop, compact `ListView` + app-bar sort menu on mobile, type-to-search filter (matches artist/title/station), export, and clear. `isHistory` adds the entry-count + logging-toggle band (`_historyControls`). Export/clear act on the **whole** file, never the filtered view.
 - **Station import/export** (`_importStations` / `_exportStations`) uses `file_picker` for the native open/save dialogs. The CSV is `name,url` with a header row; import merges non-destructively (skips URLs already present) and tolerates a header. On mobile, `file_picker` reads/writes the bytes itself (no path); on desktop we write the chosen path. On Linux it shells out to `zenity`/`kdialog` at runtime.
+- **Station filter (type-to-search)** (`_searchBar` / `_openSearch` / `_closeSearch` / `_onPageKey`): a page-level `Focus` catches the first printable keystroke (no Ctrl/Alt/Meta) to open a live name filter; an app-bar search icon is the mobile entry point. `CallbackShortcuts` maps Esc → close. Matches case-insensitive substring on `Station.name`; hides the add/import/export rows while a query is active. Tiles operate by `Station.url`, not list index, so filtering can't desync edit/delete/play. See `doc/implementation-notes.md`.
+- **`_defaultStations` mirrors `radios-selection.csv`** (repo root) — keep them in sync when curating the seed set. It only seeds the *first* launch; existing users keep their saved `stations`.
 - **`share_plus` is pinned to `^12`** — `^13` needs `win32 ^6`, which conflicts with `file_picker`'s `win32 ^5`. Don't bump it back without re-checking that constraint.
 - **`window_manager` is desktop-only** — guard calls with `_isDesktop`.
 - After any change, run `flutter analyze` (keep it at "No issues found") and rebuild before telling the user it's ready.
@@ -121,9 +125,10 @@ approach.
   works, and the saved-tracks CSV can be shared off-device via `share_plus` — see
   `doc/android-build.md`.)
 - Reorder stations; URL validation; live-refresh of the saved-tracks view.
-  (Editing a station and import/export of the list as CSV **are** done — edit via
-  the hover pencil icon → `_editStation` / `_StationDialog`; import/export via
-  `file_picker`.)
+  (Editing a station, import/export of the list as CSV, and a type-to-search
+  station filter **are** done — edit via the hover pencil icon → `_editStation` /
+  `_StationDialog`; import/export via `file_picker`; filter via `_searchBar` /
+  `_onPageKey`.)
 
 The Dart package and the on-disk binary are named `ez_tunein`; the application ID
 is `io.github.flochrislas.eztunein` (Android + Linux GTK) and the launcher/window

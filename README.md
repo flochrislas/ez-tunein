@@ -17,6 +17,10 @@ Runs on **Windows**, **Linux**, and **Android**.
   **date · radio station · artist · title**. Click a column header to sort by it,
   click a row to copy `Artist - Title` to your clipboard, or wipe the list with
   **Clear all**.
+- **Play history** — every song that plays is logged automatically (the **clock**
+  icon opens it). Same sortable view as saved tracks, plus a live **entry count**
+  and a **logging on/off** switch so you can pause recording. Search, export, and
+  clear it just like saved tracks.
 - **Export your list** — on mobile, **Share** the saved-tracks CSV via the system
   share sheet (email it to yourself, send it to your PC, save to Drive…); on
   desktop the file's already in your Documents folder and the button reveals it.
@@ -26,12 +30,15 @@ Runs on **Windows**, **Linux**, and **Android**.
 - **Import / export your stations** — back up or share your station list as a
   simple `name,url` CSV, and import one back in (new stations are merged in;
   duplicates are skipped). Both live at the bottom of the station list.
+- **Find a station fast** — just start typing to filter the list by name, or tap
+  the **search** icon in the top bar. Press **Esc** (or the **✕**) to clear.
 - **Remembers your setup** — volume and (on desktop) the window size persist
   across restarts.
 
-Your saved tracks are written to `radio_saved_tracks.csv` — on desktop that's
-your **Documents** folder, so they're easy to open in a spreadsheet (on Android
-it's an app-private file you browse via the in-app saved-tracks view).
+Your saved tracks are written to `radio_saved_tracks.csv` and the play history to
+`radio_history.csv` (same columns) — on desktop both live in your **Documents**
+folder, so they're easy to open in a spreadsheet (on Android they're app-private
+files you browse via the in-app views).
 
 ## How to install
 
@@ -160,6 +167,10 @@ The defaults in `_defaultStations` (top of `lib/main.dart`) only seed the very
 first launch.
 
 > Stream URLs must be **direct** — not `.pls`/`.m3u` playlist links.
+
+The first launch seeds a sizeable curated set (see `radios-selection.csv`); to
+find one quickly, just **start typing** to filter by name (or tap the search icon
+in the top bar). **Esc** clears the filter.
 
 To move your stations between machines, use **Import / Export stations from CSV…**
 at the bottom of the list. The file is a plain `name,url` CSV (with a header row)
