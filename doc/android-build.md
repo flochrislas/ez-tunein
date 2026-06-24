@@ -123,11 +123,17 @@ file is already in Documents) the same button instead copies the path and offers
 to open the containing folder, since `share_plus` doesn't support file sharing on
 Linux. Saving, viewing, and sharing tracks are all verified on Android and Linux.
 
-## Not done yet (Android)
+## Release signing (done)
 
-- **Release signing:** `android/app/build.gradle.kts` still signs the release
-  build with the **debug** keys (`// TODO: Add your own signing config`). Fine for
-  testing; a real keystore is needed before publishing to Play / distributing a
-  release APK.
+Release builds are signed with a real **upload keystore**. `build.gradle.kts` reads
+`android/key.properties` (git-ignored, created by
+[`script/android-signing-setup.sh`](../script/android-signing-setup.sh)) and uses
+that signing config; CI recreates `key.properties` + the keystore from repository
+secrets (`ANDROID_KEYSTORE_BASE64` / `ANDROID_KEYSTORE_PASSWORD` /
+`ANDROID_KEY_ALIAS` — see [`releasing.md`](./releasing.md)). When `key.properties`
+is absent (e.g. a fresh clone before secrets are wired) the build **falls back to
+debug** signing so it still compiles. The release workflow verifies the published
+APK is signed with the upload key, not debug.
+
 _(The launcher label is `EZ-TuneIn` via the manifest's `android:label`; the Dart
 package and binary are named `ez_tunein`.)_

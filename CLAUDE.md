@@ -124,9 +124,6 @@ approach.
 
 ## Not done yet (see implementation-notes for the full list)
 
-- Android **release signing** (still uses debug keys). (The Android build itself
-  works, and the saved-tracks CSV can be shared off-device via `share_plus` — see
-  `doc/android-build.md`.)
 - Reorder stations; URL validation; live-refresh of the saved-tracks view.
   (Editing a station, import/export of the list as CSV, and a type-to-search
   station filter **are** done — edit via the hover pencil icon → `_editStation` /

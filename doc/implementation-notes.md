@@ -346,8 +346,8 @@ With a sizeable default list, the station list has a live name filter:
 - **Android (builds & runs):** verified on a physical device (audio, live
   metadata, save/view tracks). The manifest declares the `INTERNET` permission
   and `android:usesCleartextTraffic="true"` (the HTTP SwissGroove relay needs the
-  latter). Setup, the `play()` gotcha, and release-signing TODOs live in
-  [`android-build.md`](./android-build.md).
+  latter). Setup, the `play()` gotcha, and release signing (done — upload keystore
+  via CI secrets) live in [`android-build.md`](./android-build.md).
 
 ## Known limitations / possible next steps
 
