@@ -15,6 +15,10 @@ A minimalist internet-radio player:
    list by name (type-to-search), adjust & persist volume, browse/sort/copy/clear
    saved tracks, keeps an automatic **play history** (with a logging on/off
    toggle), and (on desktop) remembers its window size.
+5. **Records a whole song to a file** — including the part that played before you
+   pressed Record — by buffering the live stream (see [Recording](#recording)).
+6. **Plays back the recordings** in a small local jukebox with auto-advance,
+   shuffle, skip, and CSV export (see [Recordings library](#recordings-library)).
 
 ## Stack
 
@@ -23,8 +27,12 @@ A minimalist internet-radio player:
   desktop it routes through `just_audio_media_kit` (+ `media_kit_libs_audio`),
   which wraps **libmpv**.
 - **Track metadata:** a hand-written ICY reader (no package — see below).
+- **Recording:** no package either — the ICY reader already walks every audio
+  byte, so recording just dumps those (already-compressed) bytes to a file. See
+  [Recording](#recording).
 - **Persistence:** `shared_preferences` (volume, station list, window size,
-  history-logging flag) and two plain CSV files (saved tracks + play history).
+  history-logging flag, recording settings) and two plain CSV files (saved tracks
+  + play history).
 - **Window sizing:** `window_manager` (desktop only).
 - **Export:** `share_plus` (OS share sheet for the saved-tracks CSV on mobile).
   Pinned to `^12`: `^13` requires `win32 ^6`, which conflicts with
@@ -60,8 +68,11 @@ So metadata is handled independently of the audio backend by **`IcyReader`**
   title containing `';` isn't cut short; it falls back to a plain match.
 
 **Consequence — and the trade-off:** this downloads the stream a *second* time
-(audio bytes are read and discarded just to reach the metadata). At ~128 kbps
+(audio bytes are read just to reach the metadata; normally discarded). At ~128 kbps
 that's negligible, and the payoff is identical behaviour on all three platforms.
+Those same audio bytes are what the recorder taps — `IcyReader` forwards them
+(batched, metadata stripped) through `onAudio`, and exposes the stream's
+`contentType`/`bitrateKbps` from the response headers. See [Recording](#recording).
 
 `IcyReader.onTitle` is a simple callback the UI sets; playback continues
 regardless of whether metadata succeeds (it's best-effort and swallows errors).
@@ -86,9 +97,13 @@ regardless of whether metadata succeeds (it's best-effort and swallows errors).
 | `_importStations` / `_exportStations` | Import/export the station list as a `name,url` CSV via `file_picker`. |
 | `_StationDialog` | Minimal name + URL dialog; returns a `Station`. Pre-fills from `initial` to edit (vs. add). |
 | `_TrackListPage` / `SavedTrack` | The shared sortable/searchable table screen, used for **both** saved tracks and play history (parameterized by `title` / `fileResolver` / `emptyMessage` / `shareSubject` / `isHistory`). `_export` shares the CSV (share sheet on mobile, reveal-in-folder on desktop); `_historyControls` adds the count + logging toggle when `isHistory`. |
-| `IcyReader` | The ICY metadata reader described above. |
+| `IcyReader` | The ICY metadata reader described above; also forwards audio bytes via `onAudio` and reports `contentType`/`bitrateKbps`. |
+| `_StreamRecorder` | Buffers the live audio to a temp file and finalizes a recording to `Artist - Title.<ext>` (see [Recording](#recording)). |
+| `_RecordingSettingsPage` | The recording-settings screen (buffering toggle, buffer size, output folder); writes the `rec_*` prefs. |
+| `_RecordingsPage` | The recordings library — lists/plays the files in the output folder with never-stops / randomize / skip / export (see [Recordings library](#recordings-library)). |
+| `recordingsDir()` / `listRecordings()` / `_isAudioFile` | Locate the recordings folder (shared by the recorder + library) and list its audio files. |
 | `savedTracksFile()` / `historyFile()` | Resolve the two CSV paths (`radio_saved_tracks.csv` / `radio_history.csv`). |
-| `_splitArtistTitle` | Splits a raw ICY `"Artist - Title"` string; shared by save + history. |
+| `_splitArtistTitle` | Splits a raw ICY `"Artist - Title"` string; shared by save, history, and recording filenames. |
 | `_parseCsv` / `_csvField` | RFC-4180 CSV read/write (no dependency). |
 | `_fmtDateTime` | Formats the ISO timestamp as `YYYY-MM-DD HH:MM`. |
 
@@ -99,6 +114,11 @@ regardless of whether metadata succeeds (it's best-effort and swallows errors).
   - `stations` (JSON string — array of `{name, url}`)
   - `win_w`, `win_h` (doubles)
   - `history_logging` (bool, default `true` — whether the player logs to history)
+  - `rec_buffering` (bool, default `true` — buffer the stream; off ⇒ no Record button)
+  - `rec_buffer_mb` (int, default `50` — buffer cap / how far back a song can be reached)
+  - `rec_dir` (string, optional — recording output folder; absent ⇒ Downloads)
+  - `rec_never_stops` (bool, default `false` — recordings library auto-advances)
+  - `rec_randomize` (bool, default `false` — recordings library shuffles)
 - **Saved tracks CSV:** `getApplicationDocumentsDirectory()/radio_saved_tracks.csv`
   with header `timestamp,station,artist,title,album,raw`.
   - **Play history** uses a second CSV, `radio_history.csv`, in the same
@@ -217,6 +237,81 @@ from the **clock** icon in the app bar.
   count is a snapshot taken when the view opens (no live refresh, like the rest of
   this screen).
 
+### Recording
+
+You can save a whole song — *including the part that already played* before you
+hit Record — to a file. The trick is that the player is always buffering the
+current track, so "record" just commits the buffer and keeps going.
+
+- **Why it's lossless and dependency-free.** Icecast/Shoutcast bytes are already
+  compressed audio (usually MP3, sometimes AAC) at the station's fixed bitrate.
+  `IcyReader` already reads every audio byte to reach the metadata; instead of
+  discarding them it forwards them via `onAudio`, and the recorder writes them to
+  disk **verbatim**. No decoding, no re-encoding, no codec package — and therefore
+  no way to *change* the bitrate (it's always the stream's own). The file
+  extension comes from the response `Content-Type` (`audio/mpeg` → `.mp3`,
+  `audio/aac`/`aacp` → `.aac`, else `.mp3`).
+- **The buffer (`_StreamRecorder`).** While a stream plays and buffering is on, the
+  current track's audio is appended to a temp file in `getTemporaryDirectory()`.
+  Until you arm recording it's capped at `rec_buffer_mb` MB: once it grows past
+  ~1.25× the cap it's trimmed to the most recent `cap` bytes (a rare, cheap
+  rewrite — songs are a few MB, so this only bites pathological single "tracks").
+  Writes are **synchronous** (`RandomAccessFile.writeFromSync`) so the stream
+  listener stays in order; like metadata, errors are swallowed.
+- **Arm → finalize.** `_toggleRecord` calls `arm()`, capturing the title/station
+  and marking the buffer to be kept regardless of the cap. The recording is
+  finalized — the buffer file moved (rename, else copy+delete) to
+  `<output>/Artist - Title.<ext>`, de-duped with ` (2)` — when the track changes
+  (`onTrackChanged`), the stream stops (`_stop`), or the station is switched
+  (`_play` finalizes the old one first). A success snackbar names the saved file.
+- **Track-change detection.** Driven by the same `IcyReader.onTitle` as history,
+  via `_handleTrackChange`, which dedups on `_lastRecTitle` (the reader re-emits
+  each tick) and **skips the first title of a session** — that's the initial song,
+  whose buffer is already running from `_play`, so resetting it would throw away
+  the start. Subsequent changes finalize + reset.
+- **One at a time / cancel.** Only one song records at once; tapping Record again
+  `cancel`s (disarms, discarding the in-progress file but keeping the buffer so you
+  can re-arm). The button is hidden entirely when `rec_buffering` is off.
+- **Settings (`_RecordingSettingsPage`).** A gear icon in the app bar opens it; it
+  writes the three `rec_*` prefs directly (same single-cached-instance trick as the
+  history toggle). On pop the player calls `_applyRecordingPrefs`, which pushes the
+  new cap/enabled state into the recorder and starts/stops live buffering if the
+  toggle flipped. Output folder defaults to `getDownloadsDirectory()` on desktop
+  (chosen via `file_picker`'s `getDirectoryPath`), falling back to the app
+  documents dir; on Android it always uses the app folder (an arbitrary user folder
+  needs SAF/MediaStore — not done).
+
+### Recordings library
+
+A small local jukebox for the recorded files (`_RecordingsPage`, opened from the
+`library_music` app-bar icon).
+
+- **Its own player.** The view creates a **separate** `AudioPlayer` from the radio's
+  `_player`, applies the saved `volume`, and `dispose()`s it when you leave — so
+  playback is **scoped to the view** (no background play, no shared state). Starting
+  a song first calls the `stopRadio` callback (the player's `_stop`) **once**
+  (`_radioStopped` guard), so the radio and a recording never sound at the same time.
+- **Listing & metadata.** `listRecordings()` scans `recordingsDir()` (the same
+  folder the recorder writes to) and keeps files whose extension passes
+  `_isAudioFile`, sorted by name. There are no audio tags — artist/title come purely
+  from the filename via `_splitArtistTitle` (recordings are `Artist - Title.ext`); a
+  file not in that shape shows its whole name as the title.
+- **Playback & auto-advance.** `_playAt` uses `setFilePath` + un-awaited `play()`
+  (same endless-stream gotcha caveat — though these are finite, completion is read
+  from `playerStateStream`, not by awaiting `play()`). When a file completes and
+  **Never stops** (`rec_never_stops`) is on, `_advance()` plays the next; **Randomize**
+  (`rec_randomize`) picks a random index instead (re-rolling once to avoid an
+  immediate repeat). The **skip** button uses the same next-index logic, so it
+  shuffles too when Randomize is on.
+- **Export.** Writes a two-column `artist,title` CSV through the same `file_picker`
+  `saveFile` flow as the station export (desktop writes the path; mobile gets the
+  bytes). The list is loaded fresh each time the view opens (`listRecordings`).
+  A **folder** icon (`_openFolder`, desktop only) opens the recordings directory in
+  the OS file manager. Each row also has an overflow menu (`_deleteFile` with a
+  confirm dialog, and `_shareFile` via `share_plus` on mobile) so files can be
+  freed/moved in-app — important on Android, where the folder isn't browsable.
+  Deleting the playing track stops it first and fixes up `_index`.
+
 ### Filtering / type-to-search
 
 With a sizeable default list, the station list has a live name filter:
@@ -263,6 +358,12 @@ With a sizeable default list, the station list has a live name filter:
   the history entry count likewise reflects open-time.
 - Play history is **unbounded** — it grows until the user clears it (there's a
   logging on/off toggle, but no automatic size cap or retention window).
+- **Recording** keeps the stream's native bitrate/codec (no transcoding, by
+  design). You can only capture from when you tuned in (joining mid-song records
+  the remainder). On **Android** recordings save to the app folder — picking an
+  arbitrary folder (e.g. Downloads) needs SAF/MediaStore plumbing, not yet done.
+  Stations that send no ICY metadata have no track boundaries, so recording is
+  inert there.
 - The application ID is `io.github.flochrislas.eztunein` (Android `applicationId`
   + `namespace`, and the Linux GTK `APPLICATION_ID` — which determines the
   `shared_preferences` directory). The Dart **package** and the on-disk **binary**

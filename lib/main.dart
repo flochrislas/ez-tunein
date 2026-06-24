@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -21,6 +22,21 @@ const _winHeightKey = 'win_h';
 // share it (shared_preferences returns one cached instance, so a write here is
 // immediately visible to the player without extra plumbing).
 const _historyLoggingKey = 'history_logging';
+// Player volume (0.0–1.0); shared by the radio player and the recordings library.
+const _volumeKey = 'volume';
+
+// Recording settings (shared across the player and the recording-settings view,
+// same single-cached-instance trick as the history toggle above).
+//  - rec_buffering: whether the stream is buffered (off ⇒ no Record button).
+//  - rec_buffer_mb: buffer cap in MB (the "rewind" window before recording).
+//  - rec_dir:       output folder; null/empty ⇒ the OS Downloads folder.
+const _recBufferingKey = 'rec_buffering';
+const _recBufferMbKey = 'rec_buffer_mb';
+const _recDirKey = 'rec_dir';
+const _recBufferMbDefault = 50;
+// Recordings-library playback toggles (the _RecordingsPage view).
+const _recNeverStopsKey = 'rec_never_stops'; // auto-play the next file at end
+const _recRandomizeKey = 'rec_randomize'; // pick the next file at random
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -232,7 +248,6 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   final _icy = IcyReader();
   Timer? _resizeDebounce;
 
-  static const _volumeKey = 'volume';
   static const _stationsKey = 'stations';
 
   SharedPreferences? _prefs;
@@ -244,6 +259,13 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   // Last title written to the play history; the ICY reader re-emits the same
   // title every metadata tick, so we dedup against this to log a song once.
   String _lastHistoryTitle = '';
+
+  // Stream recorder + UI state. The ICY reader re-emits the same title each tick,
+  // so track-change handling dedups against _lastRecTitle (mirrors history).
+  final _recorder = _StreamRecorder();
+  bool _recording = false;
+  bool _recBuffering = true; // mirrors _recBufferingKey; gates the Record button
+  String _lastRecTitle = '';
 
   // Type-to-search filter over station names. On desktop, typing a printable
   // character while the page is focused opens the search bar; on mobile the
@@ -263,7 +285,10 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
       if (!mounted) return;
       setState(() => _nowPlaying = title);
       _recordHistory(title);
+      _handleTrackChange(title);
     };
+    _icy.onAudio = _recorder.addAudio;
+    _recorder.outputDirResolver = _resolveOutputDir;
     _restorePrefs();
   }
 
@@ -286,6 +311,12 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     final savedVolume = prefs.getDouble(_volumeKey);
     if (savedVolume != null) await _player.setVolume(savedVolume);
 
+    // Recording config (defaults: buffering on, 50 MB, Downloads folder).
+    final buffering = prefs.getBool(_recBufferingKey) ?? true;
+    final bufMb = prefs.getInt(_recBufferMbKey) ?? _recBufferMbDefault;
+    _recorder.bufferingEnabled = buffering;
+    _recorder.bufferCapBytes = bufMb * 1024 * 1024;
+
     List<Station>? loadedStations;
     final savedStations = prefs.getString(_stationsKey);
     if (savedStations != null) {
@@ -302,7 +333,32 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     setState(() {
       if (savedVolume != null) _volume = savedVolume;
       if (loadedStations != null) _stations = loadedStations;
+      _recBuffering = buffering;
     });
+  }
+
+  /// Folder recordings are written to (shared with the recordings library view).
+  Future<Directory> _resolveOutputDir() => recordingsDir();
+
+  /// Re-apply recording prefs after the settings view changes them, and reflect a
+  /// buffering on/off switch on the live stream.
+  Future<void> _applyRecordingPrefs() async {
+    final prefs = _prefs;
+    if (prefs == null) return;
+    final buffering = prefs.getBool(_recBufferingKey) ?? true;
+    final bufMb = prefs.getInt(_recBufferMbKey) ?? _recBufferMbDefault;
+    final was = _recBuffering;
+    _recorder.bufferingEnabled = buffering;
+    _recorder.bufferCapBytes = bufMb * 1024 * 1024;
+    if (mounted) setState(() => _recBuffering = buffering);
+    if (_current != null && buffering != was) {
+      if (buffering) {
+        await _recorder.startBuffering();
+      } else {
+        await _recorder.onStreamStopped();
+        if (mounted) setState(() => _recording = false);
+      }
+    }
   }
 
   Future<void> _saveStations() async {
@@ -465,6 +521,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     _pageFocus.dispose();
     _player.dispose();
     _icy.stop();
+    _recorder.dispose();
     super.dispose();
   }
 
@@ -513,13 +570,19 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   }
 
   Future<void> _play(Station station) async {
+    // Switching station ends any in-progress recording (spec: a station change
+    // stops recording) — finalize it before we retune.
+    final saved = await _recorder.onStreamStopped();
     setState(() {
       _current = station;
       _loading = true;
       _nowPlaying = '';
       _lastHistoryTitle =
           ''; // new session: let the first song log even if same
+      _lastRecTitle = ''; // reset the recorder's track-change dedup
+      _recording = false;
     });
+    if (saved != null) _snack('Saved recording: ${_baseName(saved)}');
     try {
       await _player.setUrl(station.url);
       // Don't await play(): for an endless radio stream just_audio's play()
@@ -533,7 +596,9 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     } finally {
       if (mounted) setState(() => _loading = false);
     }
-    // Metadata is best-effort, on a separate connection — fire-and-forget.
+    // Start a fresh buffer (if enabled) before audio flows, then the metadata/
+    // audio reader. Both are best-effort on a separate connection.
+    await _recorder.startBuffering();
     _icy.start(station.url);
   }
 
@@ -546,12 +611,52 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   Future<void> _stop() async {
     await _player.stop();
     await _icy.stop();
+    final saved = await _recorder.onStreamStopped();
     setState(() {
       _current = null;
       _nowPlaying = '';
       _lastHistoryTitle = '';
+      _lastRecTitle = '';
+      _recording = false;
     });
+    if (saved != null) _snack('Saved recording: ${_baseName(saved)}');
   }
+
+  /// React to a genuine track change (the ICY reader re-emits the same title each
+  /// tick, so we dedup on [_lastRecTitle]). The very first title of a session is
+  /// the initial track — the buffer is already running from [_play], so we don't
+  /// reset it; only a real change finalizes an armed recording and clears it.
+  Future<void> _handleTrackChange(String title) async {
+    if (title == _lastRecTitle) return;
+    final isFirst = _lastRecTitle.isEmpty;
+    _lastRecTitle = title;
+    if (isFirst) return;
+    final saved = await _recorder.onTrackChanged();
+    if (saved != null && mounted) {
+      setState(() => _recording = false);
+      _snack('Saved recording: ${_baseName(saved)}');
+    }
+  }
+
+  /// Arm recording for the current song, or cancel an in-progress one.
+  void _toggleRecord() {
+    if (_recording) {
+      _recorder.cancel();
+      setState(() => _recording = false);
+      _snack('Recording cancelled.');
+      return;
+    }
+    if (_current == null || _nowPlaying.isEmpty) {
+      _snack('Wait for the track info before recording.');
+      return;
+    }
+    _recorder.arm(_nowPlaying, _current!.name, _icy.contentType);
+    setState(() => _recording = true);
+    _snack('Recording… it saves automatically when the track changes.');
+  }
+
+  String _baseName(String path) =>
+      path.split(Platform.pathSeparator).last;
 
   /// Append a song to the play history the first time we see its title for the
   /// current session. Fires from [IcyReader.onTitle] (which re-emits the same
@@ -701,7 +806,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
             ),
           ),
           IconButton(
-            icon: const Icon(Icons.queue_music),
+            icon: const Icon(Icons.favorite),
             tooltip: 'Saved tracks',
             onPressed: () => Navigator.of(context).push(
               MaterialPageRoute<void>(
@@ -713,6 +818,28 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
                 ),
               ),
             ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.library_music),
+            tooltip: 'Recordings',
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => _RecordingsPage(stopRadio: _stop),
+              ),
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.settings),
+            tooltip: 'Recording settings',
+            onPressed: () async {
+              await Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) =>
+                      _RecordingSettingsPage(streamBitrateKbps: _icy.bitrateKbps),
+                ),
+              );
+              await _applyRecordingPrefs(); // pick up any changes
+            },
           ),
         ],
       ),
@@ -785,16 +912,43 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
                           label: const Text('Stop'),
                         ),
                       ),
-                    if (playing) const SizedBox(width: 12),
-                    Expanded(
-                      child: FilledButton.icon(
-                        onPressed: _saveCurrentTrack,
-                        icon: const Icon(Icons.bookmark_add),
-                        label: const Text('Save current track'),
+                    // "Remember this one" needs a current track, like Record.
+                    if (playing && _nowPlaying.isNotEmpty)
+                      const SizedBox(width: 12),
+                    if (playing && _nowPlaying.isNotEmpty)
+                      Expanded(
+                        child: FilledButton.icon(
+                          onPressed: _saveCurrentTrack,
+                          icon: const Icon(Icons.favorite),
+                          label: const Text('Remember this one'),
+                        ),
                       ),
-                    ),
                   ],
                 ),
+                // Record appears only while buffering is on and a track is known
+                // (you can't record without a buffer to draw the song-start from).
+                if (playing && _recBuffering && _nowPlaying.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  SizedBox(
+                    width: double.infinity,
+                    child: _recording
+                        ? FilledButton.icon(
+                            onPressed: _toggleRecord,
+                            style: FilledButton.styleFrom(
+                              backgroundColor: Colors.red.shade700,
+                              foregroundColor: Colors.white,
+                            ),
+                            icon: const Icon(Icons.stop_circle),
+                            label: const Text('Recording… tap to cancel'),
+                          )
+                        : FilledButton.tonalIcon(
+                            onPressed: _toggleRecord,
+                            icon: Icon(Icons.fiber_manual_record,
+                                color: Colors.red.shade400),
+                            label: const Text('Record this song'),
+                          ),
+                  ),
+                ],
                 const SizedBox(height: 16),
                 const Divider(),
                 if (_searching) _searchBar(),
@@ -977,6 +1131,732 @@ class _StationDialogState extends State<_StationDialog> {
         ),
       ],
     );
+  }
+}
+
+/// Settings for the song recorder: buffering on/off, buffer size, and where
+/// recordings are saved. Persists straight to shared_preferences (the player
+/// re-reads them via _applyRecordingPrefs when this page is popped).
+class _RecordingSettingsPage extends StatefulWidget {
+  const _RecordingSettingsPage({this.streamBitrateKbps});
+
+  /// Bitrate of the currently playing stream, if any — shown read-only because
+  /// recordings keep the stream's own rate (no re-encoding).
+  final int? streamBitrateKbps;
+
+  @override
+  State<_RecordingSettingsPage> createState() => _RecordingSettingsPageState();
+}
+
+class _RecordingSettingsPageState extends State<_RecordingSettingsPage> {
+  SharedPreferences? _prefs;
+  bool _buffering = true;
+  int _bufferMb = _recBufferMbDefault;
+  String? _dir; // null/empty ⇒ Downloads (desktop) / app folder (mobile)
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    setState(() {
+      _prefs = prefs;
+      _buffering = prefs.getBool(_recBufferingKey) ?? true;
+      _bufferMb = prefs.getInt(_recBufferMbKey) ?? _recBufferMbDefault;
+      _dir = prefs.getString(_recDirKey);
+    });
+  }
+
+  Future<void> _setBuffering(bool v) async {
+    setState(() => _buffering = v);
+    await _prefs?.setBool(_recBufferingKey, v);
+  }
+
+  Future<void> _setBufferMb(int mb) async {
+    setState(() => _bufferMb = mb);
+    await _prefs?.setInt(_recBufferMbKey, mb);
+  }
+
+  Future<void> _pickDir() async {
+    String? path;
+    try {
+      path = await FilePicker.platform.getDirectoryPath(
+        dialogTitle: 'Choose where to save recordings',
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not open folder picker: $e')),
+        );
+      }
+      return;
+    }
+    final picked = path;
+    if (picked == null) return; // cancelled
+    setState(() => _dir = picked);
+    await _prefs?.setString(_recDirKey, picked);
+  }
+
+  Future<void> _resetDir() async {
+    setState(() => _dir = null);
+    await _prefs?.remove(_recDirKey);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final muted = Theme.of(context).colorScheme.onSurfaceVariant;
+    final hasDir = _dir != null && _dir!.trim().isNotEmpty;
+    return Scaffold(
+      appBar: AppBar(title: const Text('Recording settings')),
+      body: ListView(
+        padding: const EdgeInsets.all(8),
+        children: [
+          SwitchListTile(
+            title: const Text('Buffer the stream'),
+            subtitle: const Text(
+                'Required to record. When off, the Record button is hidden.'),
+            value: _buffering,
+            onChanged: _setBuffering,
+          ),
+          const Divider(),
+          ListTile(
+            title: const Text('Buffer size'),
+            subtitle: Text(
+              '$_bufferMb MB — how far back into a song you can reach when you '
+              'hit Record (≈1 min ≈ 1 MB at 128 kbps).',
+              style: TextStyle(color: _buffering ? null : muted),
+            ),
+          ),
+          Slider(
+            value: _bufferMb.clamp(5, 500).toDouble(),
+            min: 5,
+            max: 500,
+            divisions: 99,
+            label: '$_bufferMb MB',
+            onChanged:
+                _buffering ? (v) => setState(() => _bufferMb = v.round()) : null,
+            onChangeEnd: _buffering ? (v) => _setBufferMb(v.round()) : null,
+          ),
+          const Divider(),
+          ListTile(
+            title: const Text('Save recordings to'),
+            subtitle: Text(
+              hasDir
+                  ? _dir!
+                  : (_isDesktop
+                      ? 'Downloads folder (default)'
+                      : 'App folder — share recordings from the file manager'),
+            ),
+            trailing: _isDesktop
+                ? Wrap(
+                    spacing: 4,
+                    children: [
+                      if (hasDir)
+                        TextButton(
+                          onPressed: _resetDir,
+                          child: const Text('Reset'),
+                        ),
+                      FilledButton.tonal(
+                        onPressed: _pickDir,
+                        child: const Text('Change…'),
+                      ),
+                    ],
+                  )
+                : null,
+          ),
+          if (!_isDesktop)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Text(
+                'On Android, recordings save to the app folder; picking an '
+                'arbitrary folder isn\'t supported yet.',
+                style: TextStyle(color: muted, fontStyle: FontStyle.italic),
+              ),
+            ),
+          const Divider(),
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Text(
+              widget.streamBitrateKbps != null
+                  ? 'Recordings keep the stream\'s own bitrate '
+                      '(${widget.streamBitrateKbps} kbps) — no re-encoding, so '
+                      'they\'re lossless and saved instantly.'
+                  : 'Recordings keep the stream\'s own bitrate — no re-encoding, '
+                      'so they\'re lossless and saved instantly.',
+              style: TextStyle(color: muted),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Browse and play the recorded songs in the output folder — a tiny local
+/// jukebox. Owns its **own** [AudioPlayer] (separate from the radio's) and stops
+/// playback when the view is left. Starting a song stops the live radio first
+/// (passed in as [stopRadio]) so the two never play at once. Track names come
+/// from the filenames; "never stops" auto-advances and "randomize" shuffles.
+class _RecordingsPage extends StatefulWidget {
+  const _RecordingsPage({required this.stopRadio});
+
+  /// Stops the live radio stream; called once before the first recording plays.
+  final Future<void> Function() stopRadio;
+
+  @override
+  State<_RecordingsPage> createState() => _RecordingsPageState();
+}
+
+class _RecordingsPageState extends State<_RecordingsPage> {
+  final _player = AudioPlayer();
+  StreamSubscription<PlayerState>? _stateSub;
+  StreamSubscription<Duration?>? _durSub;
+  SharedPreferences? _prefs;
+
+  List<File> _files = [];
+  int _index = -1; // currently playing file, or -1
+  double _volume = 1.0; // 0.0–1.0; shares the radio's `volume` pref
+  bool _isPlaying = false;
+  Duration? _duration; // length of the current file (from durationStream)
+  double? _seekDragMs; // slider position while the user is dragging the seek bar
+  ProcessingState? _lastState; // to act on the transition *into* completed only
+  bool _neverStops = false;
+  bool _randomize = false;
+  bool _radioStopped = false; // stop the radio only once, on first play
+
+  @override
+  void initState() {
+    super.initState();
+    _init();
+    _stateSub = _player.playerStateStream.listen((s) {
+      if (!mounted) return;
+      final ps = s.processingState;
+      // "Playing" is false once a track completes (the icon should read play).
+      setState(() => _isPlaying = s.playing && ps != ProcessingState.completed);
+      // Local files are finite, so completed fires at the end → auto-advance.
+      // Only on the *transition* into completed (it can re-emit), and deferred
+      // off this callback: driving the player from inside its own event leaves
+      // the next track loaded-but-parked (was the "shows next song, stuck at
+      // 0:00" bug).
+      if (ps == ProcessingState.completed &&
+          _lastState != ProcessingState.completed &&
+          _neverStops) {
+        Future.delayed(Duration.zero, _advance);
+      }
+      _lastState = ps;
+    });
+    // Duration isn't reliably returned by setFilePath on the media_kit backend —
+    // it arrives here instead.
+    _durSub = _player.durationStream.listen((d) {
+      if (mounted) setState(() => _duration = d);
+    });
+  }
+
+  Future<void> _init() async {
+    final prefs = await SharedPreferences.getInstance();
+    final files = await listRecordings();
+    final vol = prefs.getDouble(_volumeKey);
+    if (vol != null) await _player.setVolume(vol);
+    if (!mounted) return;
+    setState(() {
+      _prefs = prefs;
+      _files = files;
+      if (vol != null) _volume = vol;
+      _neverStops = prefs.getBool(_recNeverStopsKey) ?? false;
+      _randomize = prefs.getBool(_recRandomizeKey) ?? false;
+    });
+  }
+
+  @override
+  void dispose() {
+    _stateSub?.cancel();
+    _durSub?.cancel();
+    _player.dispose(); // stops playback when leaving the view
+    super.dispose();
+  }
+
+  String _fileName(File f) => f.path.split(Platform.pathSeparator).last;
+
+  ({String artist, String title}) _parts(File f) {
+    final name = _fileName(f);
+    final dot = name.lastIndexOf('.');
+    final base = dot > 0 ? name.substring(0, dot) : name;
+    return _splitArtistTitle(base);
+  }
+
+  String _label(File f) {
+    final p = _parts(f);
+    return p.artist.isEmpty ? p.title : '${p.artist} — ${p.title}';
+  }
+
+  Future<void> _playAt(int i) async {
+    if (i < 0 || i >= _files.length) return;
+    if (!_radioStopped) {
+      await widget.stopRadio(); // first play silences the live radio
+      _radioStopped = true;
+    }
+    // Re-selecting the file that's already loaded (e.g. a one-song list under
+    // "never stops", which loops back to the same index) — just restart it.
+    // setFilePath on the same, already-completed source wouldn't replay.
+    if (i == _index) {
+      await _player.seek(Duration.zero);
+      unawaited(_player.play());
+      return;
+    }
+    try {
+      final dur = await _player.setFilePath(_files[i].path);
+      // Don't await play() (see the stream gotcha) — completion arrives on the
+      // player-state stream, which drives "never stops".
+      unawaited(_player.play());
+      if (mounted) {
+        setState(() {
+          _index = i;
+          _duration = dur;
+          _seekDragMs = null;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _index = -1;
+          _duration = null;
+        });
+        _snack('Could not play that file: $e');
+      }
+    }
+  }
+
+  int _nextIndex() {
+    final n = _files.length;
+    if (n == 0) return -1;
+    if (_randomize) {
+      if (n == 1) return 0;
+      var r = Random().nextInt(n);
+      if (r == _index) r = (r + 1) % n; // avoid an immediate repeat
+      return r;
+    }
+    return _index < 0 ? 0 : (_index + 1) % n;
+  }
+
+  void _advance() => _playAt(_nextIndex());
+  void _skip() => _playAt(_nextIndex());
+
+  void _togglePlayPause() {
+    if (_player.playing) {
+      _player.pause();
+    } else {
+      unawaited(_player.play());
+    }
+  }
+
+  Future<void> _setNeverStops(bool v) async {
+    setState(() => _neverStops = v);
+    await _prefs?.setBool(_recNeverStopsKey, v);
+  }
+
+  Future<void> _setRandomize(bool v) async {
+    setState(() => _randomize = v);
+    await _prefs?.setBool(_recRandomizeKey, v);
+  }
+
+  Future<void> _setVolume(double v) async {
+    setState(() => _volume = v);
+    await _player.setVolume(v);
+    await _prefs?.setDouble(_volumeKey, v); // shared with the radio player
+  }
+
+  /// Export the list as a two-column `artist,title` CSV (same file-picker flow as
+  /// the station export: desktop writes the path, mobile gets the bytes).
+  Future<void> _export() async {
+    if (_files.isEmpty) {
+      _snack('No recordings to export.');
+      return;
+    }
+    final csv = StringBuffer('artist,title\n');
+    for (final f in _files) {
+      final p = _parts(f);
+      csv.writeln('${_csvField(p.artist)},${_csvField(p.title)}');
+    }
+    final bytes = utf8.encode(csv.toString());
+    String? path;
+    try {
+      path = await FilePicker.platform.saveFile(
+        dialogTitle: 'Export recordings list',
+        fileName: 'ez_tunein_recordings.csv',
+        type: FileType.custom,
+        allowedExtensions: ['csv'],
+        bytes: _isDesktop ? null : bytes,
+      );
+    } catch (e) {
+      _snack('Export failed: $e');
+      return;
+    }
+    if (path == null) return; // cancelled
+    try {
+      if (_isDesktop) await File(path).writeAsString(csv.toString());
+      _snack('Exported ${_files.length} recording(s).');
+    } catch (e) {
+      _snack('Export failed: $e');
+    }
+  }
+
+  void _snack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// Permanently delete a recording (with confirmation) to free up space — the
+  /// in-app way to manage files, which matters on Android where the folder isn't
+  /// browsable. Stops playback first if it's the track currently playing.
+  Future<void> _deleteFile(int i) async {
+    if (i < 0 || i >= _files.length) return;
+    final file = _files[i];
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete recording?'),
+        content: Text('Permanently delete “${_label(file)}”?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+    final wasCurrent = i == _index;
+    try {
+      if (wasCurrent) await _player.stop();
+      if (await file.exists()) await file.delete();
+    } catch (e) {
+      _snack('Could not delete: $e');
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      _files.removeAt(i);
+      if (wasCurrent) {
+        _index = -1;
+        _duration = null;
+      } else if (i < _index) {
+        _index -= 1; // keep pointing at the same playing file
+      }
+    });
+    _snack('Deleted.');
+  }
+
+  /// Share a recording via the OS share sheet — lets the user move/copy it off
+  /// the device (the practical "save elsewhere" on mobile).
+  Future<void> _shareFile(int i) async {
+    if (i < 0 || i >= _files.length) return;
+    try {
+      await SharePlus.instance.share(ShareParams(
+        files: [XFile(_files[i].path)],
+        subject: _label(_files[i]),
+      ));
+    } catch (e) {
+      _snack('Share failed: $e');
+    }
+  }
+
+  /// Open the recordings folder in the desktop file manager so the user can
+  /// rename / delete files directly. Best-effort, desktop only.
+  Future<void> _openFolder() async {
+    try {
+      final dir = (await recordingsDir()).path;
+      if (Platform.isLinux) {
+        await Process.run('xdg-open', [dir]);
+      } else if (Platform.isWindows) {
+        await Process.run('explorer', [dir]);
+      } else if (Platform.isMacOS) {
+        await Process.run('open', [dir]);
+      }
+    } catch (e) {
+      _snack('Could not open the folder: $e');
+    }
+  }
+
+  static String _fmtDur(Duration d) {
+    final m = d.inMinutes;
+    final s = d.inSeconds % 60;
+    return '$m:${s.toString().padLeft(2, '0')}';
+  }
+
+  /// A draggable progress bar for the playing file: current position on the left,
+  /// total length on the right, slide anywhere to seek. Position ticks come from
+  /// the player; while dragging we show the drag value and seek on release.
+  Widget _seekBar() {
+    final total = _duration ?? Duration.zero;
+    final maxMs = total.inMilliseconds.toDouble();
+    return StreamBuilder<Duration>(
+      stream: _player.positionStream,
+      builder: (context, snap) {
+        final posMs = (snap.data ?? Duration.zero)
+            .inMilliseconds
+            .clamp(0, maxMs.toInt())
+            .toDouble();
+        final value = _seekDragMs ?? posMs;
+        return Row(
+          children: [
+            Text(_fmtDur(Duration(milliseconds: value.round())),
+                style: Theme.of(context).textTheme.bodySmall),
+            Expanded(
+              // The default inactive track is the surface-variant grey, which is
+              // the same as this panel's background — override it so the unplayed
+              // portion is visible.
+              child: SliderTheme(
+                data: SliderTheme.of(context).copyWith(
+                  inactiveTrackColor:
+                      Theme.of(context).colorScheme.onSurface.withValues(
+                            alpha: 0.30,
+                          ),
+                ),
+                child: Slider(
+                  value: maxMs == 0 ? 0 : value.clamp(0, maxMs),
+                  max: maxMs == 0 ? 1 : maxMs,
+                  onChanged: maxMs == 0
+                      ? null
+                      : (v) => setState(() => _seekDragMs = v),
+                  onChangeEnd: maxMs == 0
+                      ? null
+                      : (v) async {
+                          await _player.seek(Duration(milliseconds: v.round()));
+                          if (mounted) setState(() => _seekDragMs = null);
+                        },
+                ),
+              ),
+            ),
+            Text(_fmtDur(total),
+                style: Theme.of(context).textTheme.bodySmall),
+          ],
+        );
+      },
+    );
+  }
+
+  /// A compact switch sitting right next to its label (the whole row toggles).
+  Widget _toggle(String label, bool value, ValueChanged<bool> onChanged) {
+    return InkWell(
+      onTap: () => onChanged(!value),
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Switch(value: value, onChanged: onChanged),
+            const SizedBox(width: 8),
+            Text(label),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final muted = scheme.onSurfaceVariant;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Recordings'),
+        actions: [
+          if (_isDesktop)
+            IconButton(
+              icon: const Icon(Icons.folder_open),
+              tooltip: 'Open recordings folder',
+              onPressed: _openFolder,
+            ),
+          IconButton(
+            icon: const Icon(Icons.file_upload_outlined),
+            tooltip: 'Export list to CSV',
+            onPressed: _files.isEmpty ? null : _export,
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            child: Row(
+              children: [
+                Icon(
+                  _volume == 0
+                      ? Icons.volume_off
+                      : (_volume < 0.5 ? Icons.volume_down : Icons.volume_up),
+                ),
+                // Volume takes the remaining width; the toggles keep their size
+                // and sit on the right.
+                Expanded(
+                  child: Slider(value: _volume, onChanged: _setVolume),
+                ),
+                const SizedBox(width: 8),
+                _toggle('Never stops', _neverStops, _setNeverStops),
+                const SizedBox(width: 16),
+                _toggle('Randomize', _randomize, _setRandomize),
+              ],
+            ),
+          ),
+          if (_index >= 0 && _index < _files.length)
+            Container(
+              color: scheme.surfaceContainerHighest,
+              padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          _label(_files[_index]),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.titleSmall,
+                        ),
+                      ),
+                      IconButton(
+                        icon:
+                            Icon(_isPlaying ? Icons.pause : Icons.play_arrow),
+                        tooltip: _isPlaying ? 'Pause' : 'Play',
+                        onPressed: _togglePlayPause,
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.skip_next),
+                        tooltip: 'Skip',
+                        onPressed: _files.length > 1 ? _skip : null,
+                      ),
+                    ],
+                  ),
+                  _seekBar(),
+                ],
+              ),
+            ),
+          const Divider(height: 1),
+          Expanded(
+            child: _files.isEmpty
+                ? Center(
+                    child: Text(
+                      'No recordings yet — record a song first.',
+                      style:
+                          TextStyle(color: muted, fontStyle: FontStyle.italic),
+                    ),
+                  )
+                : ListView.builder(
+                    itemCount: _files.length,
+                    itemBuilder: (context, i) {
+                      final current = i == _index;
+                      return ListTile(
+                        leading: Icon(
+                          current ? Icons.graphic_eq : Icons.music_note,
+                          color: current ? scheme.primary : null,
+                        ),
+                        title: Text(_label(_files[i])),
+                        subtitle: Text(
+                          _fileName(_files[i]),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(color: muted),
+                        ),
+                        selected: current,
+                        onTap: () => _playAt(i),
+                        trailing: PopupMenuButton<String>(
+                          tooltip: 'More',
+                          icon: const Icon(Icons.more_vert),
+                          onSelected: (v) {
+                            if (v == 'delete') _deleteFile(i);
+                            if (v == 'share') _shareFile(i);
+                          },
+                          itemBuilder: (ctx) => [
+                            // Sharing files isn't supported by share_plus on
+                            // desktop Linux; the folder button covers that there.
+                            if (!_isDesktop)
+                              const PopupMenuItem(
+                                value: 'share',
+                                child: ListTile(
+                                  contentPadding: EdgeInsets.zero,
+                                  leading: Icon(Icons.share_outlined),
+                                  title: Text('Share / move…'),
+                                ),
+                              ),
+                            const PopupMenuItem(
+                              value: 'delete',
+                              child: ListTile(
+                                contentPadding: EdgeInsets.zero,
+                                leading: Icon(Icons.delete_outline),
+                                title: Text('Delete'),
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Resolve the folder recordings are written to / read from: the user's chosen
+/// folder (`rec_dir`), else the OS Downloads folder, falling back to the app
+/// documents dir (e.g. Android, where an arbitrary Downloads path isn't writable
+/// without extra plumbing). Shared by the recorder and the recordings library.
+Future<Directory> recordingsDir() async {
+  final prefs = await SharedPreferences.getInstance();
+  final custom = prefs.getString(_recDirKey);
+  if (custom != null && custom.trim().isNotEmpty) return Directory(custom);
+  if (_isDesktop) {
+    final dl = await getDownloadsDirectory();
+    if (dl != null) return dl;
+  }
+  return getApplicationDocumentsDirectory();
+}
+
+/// Audio file extensions the recordings library will list and play.
+const _audioExtensions = {
+  '.mp3',
+  '.aac',
+  '.m4a',
+  '.ogg',
+  '.opus',
+  '.flac',
+  '.wav',
+};
+
+bool _isAudioFile(String path) {
+  final dot = path.lastIndexOf('.');
+  if (dot < 0) return false;
+  return _audioExtensions.contains(path.substring(dot).toLowerCase());
+}
+
+/// List the audio files in the recordings folder, sorted by name (≈ artist then
+/// title, since recordings are named "Artist - Title.ext"). Best-effort: returns
+/// an empty list if the folder is missing or unreadable.
+Future<List<File>> listRecordings() async {
+  try {
+    final dir = await recordingsDir();
+    if (!await dir.exists()) return [];
+    final files = <File>[];
+    await for (final e in dir.list(followLinks: false)) {
+      if (e is File && _isAudioFile(e.path)) files.add(e);
+    }
+    files.sort(
+        (a, b) => a.path.toLowerCase().compareTo(b.path.toLowerCase()));
+    return files;
+  } catch (_) {
+    return [];
   }
 }
 
@@ -1554,8 +2434,21 @@ class IcyReader {
   /// Called with the raw "Artist - Title" string each time it changes.
   void Function(String title)? onTitle;
 
+  /// Called with each batch of pure audio bytes (metadata stripped) as they
+  /// arrive. The recorder hooks this to buffer the stream; left null when nobody
+  /// is recording so the bytes are simply discarded as before.
+  void Function(List<int> audioBytes)? onAudio;
+
+  /// MIME type (e.g. `audio/mpeg`) and bitrate of the current stream, taken from
+  /// the response headers. Best-effort: either may be null. Used to choose the
+  /// recording file extension and to show the rate in the recording settings.
+  String? contentType;
+  int? bitrateKbps;
+
   Future<void> start(String url) async {
     await stop();
+    contentType = null;
+    bitrateKbps = null;
     final client = HttpClient();
     _client = client;
     try {
@@ -1564,6 +2457,8 @@ class IcyReader {
       req.headers.set('User-Agent', 'radio-app');
       final resp = await req.close();
 
+      contentType = resp.headers.value('content-type')?.trim();
+      bitrateKbps = int.tryParse(resp.headers.value('icy-br') ?? '');
       final metaInt =
           int.tryParse(resp.headers.value('icy-metaint') ?? '') ?? 0;
       if (metaInt <= 0) {
@@ -1588,8 +2483,20 @@ class IcyReader {
 
     _sub = stream.listen(
       (chunk) {
-        for (final b in chunk) {
+        // Forward contiguous runs of audio bytes (everything that isn't a length
+        // byte or metadata) to onAudio in batches rather than byte-by-byte.
+        var audioStart = -1;
+        void flushAudio(int end) {
+          if (audioStart >= 0) {
+            onAudio?.call(chunk.sublist(audioStart, end));
+            audioStart = -1;
+          }
+        }
+
+        for (var i = 0; i < chunk.length; i++) {
+          final b = chunk[i];
           if (readingLen) {
+            flushAudio(i); // the length byte ends the current audio run
             metaRemaining = b * 16;
             readingLen = false;
             if (metaRemaining == 0) {
@@ -1607,12 +2514,14 @@ class IcyReader {
               bytesUntilMeta = metaInt;
             }
           } else {
+            if (audioStart < 0) audioStart = i;
             bytesUntilMeta--;
             if (bytesUntilMeta == 0) {
               readingLen = true;
             }
           }
         }
+        flushAudio(chunk.length); // trailing audio run in this chunk
       },
       onError: (_) {},
       cancelOnError: false,
@@ -1636,5 +2545,209 @@ class IcyReader {
     _sub = null;
     _client?.close(force: true);
     _client = null;
+  }
+}
+
+/// Buffers the live audio of the current track to a temp file so the user can
+/// record a song they're already partway through, then writes the finished song
+/// to the output folder. The player feeds it audio via [IcyReader.onAudio] and
+/// tells it when the track changes or playback stops.
+///
+/// Per track: bytes accumulate into a temp buffer file (capped at
+/// [bufferCapBytes] until armed; oldest bytes dropped). [arm] marks "record this
+/// song" — the buffer already holds the song so far and keeps growing, ignoring
+/// the cap. [onTrackChanged]/[onStreamStopped] finalize an armed recording (move
+/// the buffer into the output folder) and clear the buffer for the next track.
+///
+/// Recording is lossless: Icecast/Shoutcast bytes are already compressed
+/// (MP3/AAC), so they're written verbatim — no decoding or re-encoding.
+class _StreamRecorder {
+  // Config, pushed in from prefs by the player.
+  bool bufferingEnabled = true;
+  int bufferCapBytes = 50 * 1024 * 1024;
+  Future<Directory> Function()? outputDirResolver;
+
+  File? _buffer;
+  RandomAccessFile? _raf;
+  int _bytes = 0;
+  bool _armed = false;
+  String _title = '';
+  String _station = '';
+  String _ext = 'mp3';
+
+  bool get isRecording => _armed;
+
+  Future<File> _bufferFile() async {
+    final dir = await getTemporaryDirectory();
+    return File('${dir.path}/ez_record_buffer.part');
+  }
+
+  /// Begin (or restart) buffering for a fresh track. No-op when buffering is off.
+  Future<void> startBuffering() async {
+    if (!bufferingEnabled) return;
+    _armed = false;
+    await _closeRaf();
+    final f = await _bufferFile();
+    // FileMode.write truncates and allows reading (needed by the cap trim).
+    _raf = f.openSync(mode: FileMode.write);
+    _buffer = f;
+    _bytes = 0;
+  }
+
+  /// Append a batch of audio bytes (called from [IcyReader.onAudio]). Synchronous
+  /// so the stream listener stays in order; best-effort, write errors ignored.
+  void addAudio(List<int> bytes) {
+    final raf = _raf;
+    if (!bufferingEnabled || raf == null) return;
+    try {
+      raf.writeFromSync(bytes);
+      _bytes += bytes.length;
+      // Until recording is armed, keep only the most recent ~bufferCapBytes so a
+      // marathon single "track" can't grow without bound. Hysteresis (1.25×)
+      // keeps the rare rewrite infrequent. While armed we keep everything.
+      if (!_armed && _bytes > bufferCapBytes + (bufferCapBytes >> 2)) {
+        _trimToTail();
+      }
+    } catch (_) {
+      // Buffering is best-effort, like metadata — ignore write failures.
+    }
+  }
+
+  void _trimToTail() {
+    final raf = _raf;
+    if (raf == null) return;
+    try {
+      raf.flushSync();
+      final len = raf.lengthSync();
+      if (len <= bufferCapBytes) return;
+      raf.setPositionSync(len - bufferCapBytes);
+      final tail = raf.readSync(bufferCapBytes);
+      raf.truncateSync(0);
+      raf.setPositionSync(0);
+      raf.writeFromSync(tail);
+      _bytes = tail.length;
+    } catch (_) {
+      // If the trim fails, leave the buffer as-is rather than dropping it.
+    }
+  }
+
+  /// Mark the current track to be recorded. The buffer already holds the song so
+  /// far; from now on bytes are kept regardless of the cap.
+  void arm(String title, String station, String? contentType) {
+    if (!bufferingEnabled || _raf == null) return;
+    _armed = true;
+    _title = title;
+    _station = station;
+    _ext = _extFor(contentType);
+  }
+
+  /// Discard an in-progress recording but keep buffering the same track (so the
+  /// user can re-arm). The cap applies again once disarmed.
+  void cancel() => _armed = false;
+
+  /// Finalize an armed recording (if any) and start a clean buffer for the next
+  /// track. Returns the saved file path, or null if nothing was recording.
+  Future<String?> onTrackChanged() async {
+    final path = await _finalizeIfArmed();
+    await startBuffering();
+    return path;
+  }
+
+  /// Finalize an armed recording (if any) and tear the buffer down (stream ended
+  /// or the station was switched).
+  Future<String?> onStreamStopped() async {
+    final path = await _finalizeIfArmed();
+    await _closeRaf();
+    await _deleteBuffer();
+    return path;
+  }
+
+  Future<void> dispose() async {
+    await _closeRaf();
+    await _deleteBuffer();
+  }
+
+  Future<String?> _finalizeIfArmed() async {
+    if (!_armed) return null;
+    _armed = false;
+    await _closeRaf();
+    final src = _buffer;
+    if (src == null || !await src.exists()) return null;
+    try {
+      final dir = await outputDirResolver!();
+      if (!await dir.exists()) await dir.create(recursive: true);
+      final outPath = await _uniquePath(dir, _fileNameBase(), _ext);
+      // Move the buffer into place: rename on the same volume, else copy+delete.
+      try {
+        await src.rename(outPath);
+      } on FileSystemException {
+        await src.copy(outPath);
+        try {
+          await src.delete();
+        } catch (_) {}
+      }
+      _buffer = null; // moved away; startBuffering() will make a fresh one
+      return outPath;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _closeRaf() async {
+    final raf = _raf;
+    _raf = null;
+    if (raf == null) return;
+    try {
+      raf.flushSync();
+      raf.closeSync();
+    } catch (_) {}
+  }
+
+  Future<void> _deleteBuffer() async {
+    final f = _buffer;
+    _buffer = null;
+    if (f == null) return;
+    try {
+      if (await f.exists()) await f.delete();
+    } catch (_) {}
+  }
+
+  String _fileNameBase() {
+    final parts = _splitArtistTitle(_title);
+    final raw = parts.artist.isEmpty
+        ? parts.title
+        : '${parts.artist} - ${parts.title}';
+    final cleaned = _sanitize(raw);
+    if (cleaned.isNotEmpty) return cleaned;
+    return _sanitize(_station.isEmpty ? 'recording' : _station);
+  }
+
+  /// Strip filesystem-illegal characters and control codes; collapse whitespace
+  /// and cap the length so the name is safe on Windows, Linux, and Android.
+  static String _sanitize(String s) {
+    final cleaned = s
+        .replaceAll(RegExp(r'[\\/:*?"<>|\x00-\x1f]'), '_')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    return cleaned.length > 120 ? cleaned.substring(0, 120).trim() : cleaned;
+  }
+
+  static String _extFor(String? contentType) {
+    final ct = (contentType ?? '').toLowerCase();
+    if (ct.contains('aac')) return 'aac'; // audio/aac, audio/aacp
+    if (ct.contains('ogg')) return 'ogg';
+    if (ct.contains('mpeg') || ct.contains('mp3')) return 'mp3';
+    return 'mp3'; // sensible default; most stations are MP3
+  }
+
+  static Future<String> _uniquePath(
+      Directory dir, String base, String ext) async {
+    final sep = Platform.pathSeparator;
+    var candidate = '${dir.path}$sep$base.$ext';
+    if (!await File(candidate).exists()) return candidate;
+    for (var n = 2;; n++) {
+      candidate = '${dir.path}$sep$base ($n).$ext';
+      if (!await File(candidate).exists()) return candidate;
+    }
   }
 }

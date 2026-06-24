@@ -13,6 +13,17 @@ Runs on **Windows**, **Linux**, and **Android**.
 - **Live "now playing"** — see the current artist and track update as the music
   changes.
 - **Save the songs you like** — one click logs the current track.
+- **Record a whole song** — hit **Record** and EZ-TuneIn saves the song to a file
+  (mp3), *including the part that already played* before you pressed the button (it
+  quietly buffers the stream as you listen). Recording finishes on its own when the
+  track changes. Lossless and instant — the station's audio is saved as-is, no
+  re-encoding. Tune the buffer size and save location in **Recording settings**.
+- **Recordings library** — the **library** icon opens a list of your recorded songs;
+  tap one to play it (with a seek bar to scrub). Flip **Never stops** to roll into
+  the next song automatically, **Randomize** to shuffle, use **skip** to jump ahead,
+  and **export** the list as a simple `artist,title` CSV. Each song's **⋮** menu lets
+  you **delete** it (to free space) or **share/move** it off the device; on desktop a
+  **folder** button opens the recordings folder.
 - **Saved tracks view** — browse everything you've saved in a sortable table of
   **date · radio station · artist · title**. Click a column header to sort by it,
   click a row to copy `Artist - Title` to your clipboard, or wipe the list with
@@ -38,7 +49,9 @@ Runs on **Windows**, **Linux**, and **Android**.
 Your saved tracks are written to `radio_saved_tracks.csv` and the play history to
 `radio_history.csv` (same columns) — on desktop both live in your **Documents**
 folder, so they're easy to open in a spreadsheet (on Android they're app-private
-files you browse via the in-app views).
+files you browse via the in-app views). **Recorded songs** go to your
+**Downloads** folder by default (change it in Recording settings); on Android they
+save to the app folder.
 
 ## How to install
 
