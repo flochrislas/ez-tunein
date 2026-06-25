@@ -4,6 +4,17 @@
     <uses-permission android:name="android.permission.INTERNET"/>
     <!-- usesCleartextTraffic: some relays (e.g. SwissGroove) are plain HTTP;
          Android blocks cleartext by default since API 28. -->
+
+    <!-- Foreground service used to keep recording alive with the screen off
+         (flutter_foreground_task). The service is started only while a song is
+         being recorded; audio playback is ongoing then, so its type is
+         mediaPlayback. POST_NOTIFICATIONS (Android 13+) is needed for its
+         ongoing status notification. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
+
     <application
         android:label="EZ-TuneIn"
         android:name="${applicationName}"
@@ -36,6 +47,13 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+
+        <!-- flutter_foreground_task's service. Name must not change.
+             foregroundServiceType matches the mediaPlayback permission above. -->
+        <service
+            android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
+            android:foregroundServiceType="mediaPlayback"
+            android:exported="false" />
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and

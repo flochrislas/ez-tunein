@@ -123,6 +123,49 @@ file is already in Documents) the same button instead copies the path and offers
 to open the containing folder, since `share_plus` doesn't support file sharing on
 Linux. Saving, viewing, and sharing tracks are all verified on Android and Linux.
 
+## Background playback & recording (the screen-off freeze)
+
+Both playback and recording run on the Flutter **main isolate**: just_audio drives
+ExoPlayer, and recording reads the stream + detects song boundaries on a separate
+HTTP connection (`IcyReader`). When the screen goes off and the app is
+backgrounded, Android's **Doze / App-Standby** freezes that isolate — playback dies
+(after ExoPlayer's buffer coasts a while) and no new stream bytes are parsed, so a
+recording's track-change never fires (it finalizes late, or as one big file, when
+you wake the screen).
+
+The fix is a **foreground service** (`flutter_foreground_task`) that runs the whole
+time a station is playing:
+
+- `_syncPlaybackService` starts a `mediaPlayback` service (silent ongoing
+  notification, wake-lock + Wi-Fi-lock) when you start a station, refreshes its
+  text on track/recording changes, and stops it when you Stop. The foreground
+  priority exempts the process from Doze, so **playback keeps going** and the
+  recording loop still detects the next track with the screen off.
+- The notification carries a **Stop** button (live radio has no useful pause).
+  Taps are received in a background task-handler isolate
+  (`_PlaybackServiceHandler.onNotificationButtonPressed`) and relayed to the UI
+  isolate via `sendDataToMain`, where `_onForegroundData` calls `_stop`. Tapping
+  the notification body re-opens the app.
+- It's **Android-only** (`Platform.isAndroid`) and best-effort — if it can't start
+  (e.g. notifications denied), playback/recording still work while foregrounded.
+
+Manifest additions: `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_MEDIA_PLAYBACK`,
+`POST_NOTIFICATIONS`, `WAKE_LOCK`, and the
+`com.pravera.flutter_foreground_task.service.ForegroundService` declaration with
+`android:foregroundServiceType="mediaPlayback"`.
+
+> We deliberately did **not** use `just_audio_background`: it allows only one
+> `AudioPlayer` in the whole app, which would crash the recordings library (it
+> owns a second player), and would force migrating playback to
+> `AudioSource`/`MediaItem`. A standalone service avoids both. The trade-off is no
+> true `MediaSession` — i.e. no rich media-card UI and no headset/Bluetooth
+> media-button control.
+
+This addresses the *background freeze*. It does **not** change the other limitation
+of ICY metadata — some stations announce the next title a few seconds early, so a
+cut can feel slightly early; fixing that would need decoding the audio (an
+ffmpeg-class dependency we avoid on purpose).
+
 ## Release signing (done)
 
 Release builds are signed with a real **upload keystore**. `build.gradle.kts` reads

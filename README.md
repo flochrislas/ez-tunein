@@ -9,7 +9,9 @@ Runs on **Windows**, **Linux**, and **Android**.
 ## Features
 
 - **Play internet radio** — stream Icecast/Shoutcast stations such as SomaFM's
-  Groove Salad, Drone Zone, or SwissGroove.
+  Groove Salad, Drone Zone, or SwissGroove. On Android it keeps playing (and
+  recording) with the screen off — a notification shows what's on with a **Stop**
+  button, so you can pocket the phone and let the music run.
 - **Live "now playing"** — see the current artist and track update as the music
   changes.
 - **Save the songs you like** — one click logs the current track.
@@ -23,7 +25,9 @@ Runs on **Windows**, **Linux**, and **Android**.
   the next song automatically, **Randomize** to shuffle, use **skip** to jump ahead,
   and **export** the list as a simple `artist,title` CSV. Each song's **⋮** menu lets
   you **delete** it (to free space) or **share/move** it off the device; on desktop a
-  **folder** button opens the recordings folder.
+  **folder** button opens the recordings folder. On Android it keeps playing with the
+  screen off, with **Pause/Play**, **Skip**, and **Stop** on the lock-screen
+  notification.
 - **Saved tracks view** — browse everything you've saved in a sortable table of
   **date · radio station · artist · title**. Click a column header to sort by it,
   click a row to copy `Artist - Title` to your clipboard, or wipe the list with

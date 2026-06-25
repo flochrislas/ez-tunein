@@ -6,6 +6,7 @@ import 'dart:math';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_media_kit/just_audio_media_kit.dart';
 import 'package:path_provider/path_provider.dart';
@@ -48,6 +49,37 @@ void main() async {
     macOS: true,
   );
 
+  // Android: configure the foreground service that runs while audio plays. It
+  // holds the app process in the foreground so the OS won't freeze it with the
+  // screen off — keeping both playback and the recording/metadata socket loop
+  // alive — and shows a notification with a Stop button (see _syncPlayback
+  // Service). Pure-Dart config only here; the service starts on demand.
+  if (Platform.isAndroid) {
+    FlutterForegroundTask.initCommunicationPort();
+    FlutterForegroundTask.init(
+      androidNotificationOptions: AndroidNotificationOptions(
+        channelId: 'ez_tunein_playback',
+        channelName: 'Playback',
+        channelDescription: 'Shown while EZ-TuneIn is playing or recording.',
+        // Silent + low-key: it's a status indicator, not an alert.
+        onlyAlertOnce: true,
+      ),
+      iosNotificationOptions: const IOSNotificationOptions(),
+      foregroundTaskOptions: ForegroundTaskOptions(
+        // No periodic task isolate — the handler only relays Stop-button taps
+        // (see _foregroundTaskCallback); the service exists to hold the process
+        // in the foreground so playback + the metadata loop survive the screen
+        // turning off.
+        eventAction: ForegroundTaskEventAction.nothing(),
+        // Keep the CPU and Wi-Fi radio awake so the stream keeps flowing.
+        allowWakeLock: true,
+        allowWifiLock: true,
+        // If the user swipes the app away, stop everything rather than linger.
+        stopWithTask: true,
+      ),
+    );
+  }
+
   // On desktop, restore the saved window size before showing the window.
   if (_isDesktop) {
     await windowManager.ensureInitialized();
@@ -68,6 +100,36 @@ void main() async {
   }
 
   runApp(const RadioApp());
+}
+
+/// Entry point for the foreground-service task isolate (Android). It runs in a
+/// separate isolate, so it can't touch the player directly — it only relays
+/// notification-button taps back to the UI isolate via [sendDataToMain], where
+/// [_PlayerPageState._onForegroundData] acts on them. Must be top-level and
+/// annotated so it survives tree-shaking / AOT compilation.
+@pragma('vm:entry-point')
+void _foregroundTaskCallback() {
+  FlutterForegroundTask.setTaskHandler(_PlaybackServiceHandler());
+}
+
+class _PlaybackServiceHandler extends TaskHandler {
+  @override
+  Future<void> onStart(DateTime timestamp, TaskStarter starter) async {}
+
+  // Unused: eventAction is .nothing(), so this never fires.
+  @override
+  void onRepeatEvent(DateTime timestamp) {}
+
+  @override
+  Future<void> onDestroy(DateTime timestamp, bool isTimeout) async {}
+
+  @override
+  void onNotificationButtonPressed(String id) =>
+      FlutterForegroundTask.sendDataToMain(id);
+
+  // Tapping the notification body brings the app back to the front.
+  @override
+  void onNotificationPressed() => FlutterForegroundTask.launchApp();
 }
 
 /// A radio station: a display name and an Icecast/Shoutcast stream URL.
@@ -289,6 +351,10 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     };
     _icy.onAudio = _recorder.addAudio;
     _recorder.outputDirResolver = _resolveOutputDir;
+    // Receive notification-button taps relayed from the foreground service.
+    if (Platform.isAndroid) {
+      FlutterForegroundTask.addTaskDataCallback(_onForegroundData);
+    }
     _restorePrefs();
   }
 
@@ -357,6 +423,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
       } else {
         await _recorder.onStreamStopped();
         if (mounted) setState(() => _recording = false);
+        unawaited(_syncPlaybackService()); // clear "recording" from the notif
       }
     }
   }
@@ -522,6 +589,10 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     _player.dispose();
     _icy.stop();
     _recorder.dispose();
+    if (Platform.isAndroid) {
+      FlutterForegroundTask.removeTaskDataCallback(_onForegroundData);
+      unawaited(FlutterForegroundTask.stopService());
+    }
     super.dispose();
   }
 
@@ -600,6 +671,8 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     // audio reader. Both are best-effort on a separate connection.
     await _recorder.startBuffering();
     _icy.start(station.url);
+    // Raise (or refresh) the playback foreground service for this station.
+    unawaited(_syncPlaybackService());
   }
 
   Future<void> _setVolume(double value) async {
@@ -619,6 +692,8 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
       _lastRecTitle = '';
       _recording = false;
     });
+    // _current is now null, so this tears the service down.
+    unawaited(_syncPlaybackService());
     if (saved != null) _snack('Saved recording: ${_baseName(saved)}');
   }
 
@@ -630,12 +705,20 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     if (title == _lastRecTitle) return;
     final isFirst = _lastRecTitle.isEmpty;
     _lastRecTitle = title;
-    if (isFirst) return;
+    if (isFirst) {
+      // Reflect the first real title in the playback notification.
+      unawaited(_syncPlaybackService());
+      return;
+    }
     final saved = await _recorder.onTrackChanged();
     if (saved != null && mounted) {
       setState(() => _recording = false);
       _snack('Saved recording: ${_baseName(saved)}');
+    } else if (saved != null) {
+      _recording = false;
     }
+    // Refresh the notification text for the new track / cleared recording state.
+    unawaited(_syncPlaybackService());
   }
 
   /// Arm recording for the current song, or cancel an in-progress one.
@@ -643,6 +726,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     if (_recording) {
       _recorder.cancel();
       setState(() => _recording = false);
+      unawaited(_syncPlaybackService()); // notification back to plain "playing"
       _snack('Recording cancelled.');
       return;
     }
@@ -652,7 +736,57 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     }
     _recorder.arm(_nowPlaying, _current!.name, _icy.contentType);
     setState(() => _recording = true);
+    unawaited(_syncPlaybackService()); // reflect "recording" in the notification
     _snack('Recording… it saves automatically when the track changes.');
+  }
+
+  /// Keep the Android playback foreground service in sync with the current
+  /// state. While a station is active the service holds the app process in the
+  /// foreground so the OS won't freeze it with the screen off (keeping both
+  /// playback and the recording/metadata socket loop alive), and shows a
+  /// notification — with a Stop button — reflecting what's playing/recording.
+  /// When nothing is active the service is torn down. No-op off Android;
+  /// best-effort (a failure here never breaks playback or recording).
+  Future<void> _syncPlaybackService() async {
+    if (!Platform.isAndroid) return;
+    try {
+      final running = await FlutterForegroundTask.isRunningService;
+      // Nothing playing ⇒ no service.
+      if (_current == null) {
+        if (running) await FlutterForegroundTask.stopService();
+        return;
+      }
+      final title = _current!.name;
+      final text = _recording
+          ? 'Recording: ${_nowPlaying.isEmpty ? 'current song' : _nowPlaying}'
+          : (_nowPlaying.isEmpty ? 'Playing' : _nowPlaying);
+      const buttons = [NotificationButton(id: 'stop', text: 'Stop')];
+      if (running) {
+        await FlutterForegroundTask.updateService(
+          notificationTitle: title,
+          notificationText: text,
+          notificationButtons: buttons,
+        );
+      } else {
+        final perm = await FlutterForegroundTask.checkNotificationPermission();
+        if (perm != NotificationPermission.granted) {
+          await FlutterForegroundTask.requestNotificationPermission();
+        }
+        await FlutterForegroundTask.startService(
+          serviceTypes: const [ForegroundServiceTypes.mediaPlayback],
+          notificationTitle: title,
+          notificationText: text,
+          notificationButtons: buttons,
+          callback: _foregroundTaskCallback,
+        );
+      }
+    } catch (_) {}
+  }
+
+  /// Handle data relayed from the foreground-service isolate (notification
+  /// button taps). Currently just the Stop button.
+  void _onForegroundData(Object data) {
+    if (data == 'stop') unawaited(_stop());
   }
 
   String _baseName(String path) =>
@@ -877,27 +1011,56 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
                   ],
                 ),
                 const SizedBox(height: 8),
-                // Now playing
-                Card(
-                  child: Padding(
-                    padding: const EdgeInsets.all(20),
-                    child: Column(
-                      children: [
-                        Text(
-                          playing ? _current!.name : 'Stopped',
-                          style: Theme.of(context).textTheme.titleMedium,
-                        ),
-                        const SizedBox(height: 8),
-                        Text(
-                          _loading
-                              ? 'Connecting…'
-                              : (_nowPlaying.isEmpty
-                                  ? (playing ? 'Waiting for track info…' : '—')
-                                  : _nowPlaying),
-                          style: Theme.of(context).textTheme.headlineSmall,
-                          textAlign: TextAlign.center,
-                        ),
-                      ],
+                // Now playing — glows with a thin red neon border while recording.
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 300),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: _recording
+                          ? Colors.red.shade500
+                          : Colors.transparent,
+                      width: 1.5,
+                    ),
+                    boxShadow: _recording
+                        ? [
+                            BoxShadow(
+                              color: Colors.red.shade500.withValues(alpha: 0.6),
+                              blurRadius: 16,
+                              spreadRadius: 1,
+                            ),
+                            BoxShadow(
+                              color: Colors.red.shade400.withValues(alpha: 0.3),
+                              blurRadius: 32,
+                              spreadRadius: 4,
+                            ),
+                          ]
+                        : const [],
+                  ),
+                  child: Card(
+                    margin: EdgeInsets.zero,
+                    child: Padding(
+                      padding: const EdgeInsets.all(20),
+                      child: Column(
+                        children: [
+                          Text(
+                            playing ? _current!.name : 'Stopped',
+                            style: Theme.of(context).textTheme.titleMedium,
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            _loading
+                                ? 'Connecting…'
+                                : (_nowPlaying.isEmpty
+                                    ? (playing
+                                        ? 'Waiting for track info…'
+                                        : '—')
+                                    : _nowPlaying),
+                            style: Theme.of(context).textTheme.headlineSmall,
+                            textAlign: TextAlign.center,
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -912,7 +1075,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
                           label: const Text('Stop'),
                         ),
                       ),
-                    // "Remember this one" needs a current track, like Record.
+                    // "Save title" needs a current track, like Record.
                     if (playing && _nowPlaying.isNotEmpty)
                       const SizedBox(width: 12),
                     if (playing && _nowPlaying.isNotEmpty)
@@ -920,7 +1083,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
                         child: FilledButton.icon(
                           onPressed: _saveCurrentTrack,
                           icon: const Icon(Icons.favorite),
-                          label: const Text('Remember this one'),
+                          label: const Text('Save title'),
                         ),
                       ),
                   ],
@@ -1332,11 +1495,17 @@ class _RecordingsPageState extends State<_RecordingsPage> {
   void initState() {
     super.initState();
     _init();
+    // Receive notification-button taps relayed from the foreground service.
+    if (Platform.isAndroid) {
+      FlutterForegroundTask.addTaskDataCallback(_onForegroundData);
+    }
     _stateSub = _player.playerStateStream.listen((s) {
       if (!mounted) return;
       final ps = s.processingState;
       // "Playing" is false once a track completes (the icon should read play).
       setState(() => _isPlaying = s.playing && ps != ProcessingState.completed);
+      // Keep the lock-screen notification (play/pause label, etc.) in step.
+      unawaited(_syncRecordingsService());
       // Local files are finite, so completed fires at the end → auto-advance.
       // Only on the *transition* into completed (it can re-emit), and deferred
       // off this callback: driving the player from inside its own event leaves
@@ -1376,6 +1545,11 @@ class _RecordingsPageState extends State<_RecordingsPage> {
     _stateSub?.cancel();
     _durSub?.cancel();
     _player.dispose(); // stops playback when leaving the view
+    // Leaving the view stops playback, so drop the foreground service too.
+    if (Platform.isAndroid) {
+      FlutterForegroundTask.removeTaskDataCallback(_onForegroundData);
+      unawaited(FlutterForegroundTask.stopService());
+    }
     super.dispose();
   }
 
@@ -1419,6 +1593,7 @@ class _RecordingsPageState extends State<_RecordingsPage> {
           _seekDragMs = null;
         });
       }
+      unawaited(_syncRecordingsService()); // reflect the new track in the notif
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -1451,6 +1626,77 @@ class _RecordingsPageState extends State<_RecordingsPage> {
     } else {
       unawaited(_player.play());
     }
+  }
+
+  /// Stop playback entirely (the lock-screen Stop button). Clears the now-playing
+  /// row, which also tears the foreground service down via [_syncRecordingsService].
+  Future<void> _stopPlayback() async {
+    await _player.stop();
+    if (mounted) {
+      setState(() {
+        _index = -1;
+        _duration = null;
+        _seekDragMs = null;
+        _isPlaying = false;
+      });
+    }
+    unawaited(_syncRecordingsService());
+  }
+
+  /// Handle notification-button taps relayed from the foreground-service isolate.
+  /// IDs are prefixed `rec_` so the radio player's handler ignores them (both
+  /// pages keep a callback registered while the recordings view is on top).
+  void _onForegroundData(Object data) {
+    switch (data) {
+      case 'rec_toggle':
+        _togglePlayPause();
+      case 'rec_skip':
+        _skip();
+      case 'rec_stop':
+        unawaited(_stopPlayback());
+    }
+  }
+
+  /// Keep the Android playback foreground service in step with recordings
+  /// playback: while a file is loaded it shows a notification (current track,
+  /// Pause/Play + Skip + Stop buttons) and holds the process in the foreground so
+  /// playback survives the screen turning off; with nothing loaded it's stopped.
+  /// No-op off Android; best-effort.
+  Future<void> _syncRecordingsService() async {
+    if (!Platform.isAndroid) return;
+    try {
+      final running = await FlutterForegroundTask.isRunningService;
+      if (_index < 0 || _index >= _files.length) {
+        if (running) await FlutterForegroundTask.stopService();
+        return;
+      }
+      final buttons = [
+        NotificationButton(id: 'rec_toggle', text: _isPlaying ? 'Pause' : 'Play'),
+        const NotificationButton(id: 'rec_skip', text: 'Skip'),
+        const NotificationButton(id: 'rec_stop', text: 'Stop'),
+      ];
+      final title = _label(_files[_index]);
+      final text = _isPlaying ? 'Playing' : 'Paused';
+      if (running) {
+        await FlutterForegroundTask.updateService(
+          notificationTitle: title,
+          notificationText: text,
+          notificationButtons: buttons,
+        );
+      } else {
+        final perm = await FlutterForegroundTask.checkNotificationPermission();
+        if (perm != NotificationPermission.granted) {
+          await FlutterForegroundTask.requestNotificationPermission();
+        }
+        await FlutterForegroundTask.startService(
+          serviceTypes: const [ForegroundServiceTypes.mediaPlayback],
+          notificationTitle: title,
+          notificationText: text,
+          notificationButtons: buttons,
+          callback: _foregroundTaskCallback,
+        );
+      }
+    } catch (_) {}
   }
 
   Future<void> _setNeverStops(bool v) async {
@@ -1689,23 +1935,51 @@ class _RecordingsPageState extends State<_RecordingsPage> {
         children: [
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-            child: Row(
-              children: [
-                Icon(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final volIcon = Icon(
                   _volume == 0
                       ? Icons.volume_off
                       : (_volume < 0.5 ? Icons.volume_down : Icons.volume_up),
-                ),
-                // Volume takes the remaining width; the toggles keep their size
-                // and sit on the right.
-                Expanded(
-                  child: Slider(value: _volume, onChanged: _setVolume),
-                ),
-                const SizedBox(width: 8),
-                _toggle('Never stops', _neverStops, _setNeverStops),
-                const SizedBox(width: 16),
-                _toggle('Randomize', _randomize, _setRandomize),
-              ],
+                );
+                final slider = Slider(value: _volume, onChanged: _setVolume);
+                final toggles = Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _toggle('Never stops', _neverStops, _setNeverStops),
+                    const SizedBox(width: 16),
+                    _toggle('Randomize', _randomize, _setRandomize),
+                  ],
+                );
+                // Approx fixed width of the icon + spacing + both toggles. If the
+                // slider couldn't get at least half the row, drop the toggles to
+                // a second row and let the slider span the full width.
+                const reserved = 320.0;
+                final sliderGetsHalf =
+                    constraints.maxWidth - reserved >= constraints.maxWidth / 2;
+                if (sliderGetsHalf) {
+                  return Row(
+                    children: [
+                      volIcon,
+                      Expanded(child: slider),
+                      const SizedBox(width: 8),
+                      toggles,
+                    ],
+                  );
+                }
+                return Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      children: [
+                        volIcon,
+                        Expanded(child: slider),
+                      ],
+                    ),
+                    Align(alignment: Alignment.centerRight, child: toggles),
+                  ],
+                );
+              },
             ),
           ),
           if (_index >= 0 && _index < _files.length)
