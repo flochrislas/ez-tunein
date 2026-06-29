@@ -1,0 +1,38 @@
+# Continuous integration: lint, test, and a debug Linux build on every push/PR.
+# This is the same gate the release workflow runs (the `verify` job) before it
+# builds any platform artifacts — so broken code can't be tagged into a release.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  FLUTTER_VERSION: '3.44.1'
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test
+
+      # A debug Linux build verifies the native toolchain + libmpv linkage.
+      - name: Install Linux desktop + libmpv build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang cmake ninja-build pkg-config \
+            libgtk-3-dev liblzma-dev libmpv-dev mpv
+      - run: flutter config --enable-linux-desktop
+      - run: flutter build linux --debug

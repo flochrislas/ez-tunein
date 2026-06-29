@@ -9,13 +9,16 @@ import 'package:flutter/services.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_media_kit/just_audio_media_kit.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 
-/// Desktop platforms have a resizable OS window to manage; mobile does not.
-final _isDesktop = Platform.isLinux || Platform.isWindows || Platform.isMacOS;
+import 'csv_utils.dart';
+import 'icy_reader.dart';
+import 'storage_paths.dart';
+import 'stream_recorder.dart';
+import 'track_utils.dart';
+
 const _winWidthKey = 'win_w';
 const _winHeightKey = 'win_h';
 // Whether the player logs played songs to the history CSV. Toggled from the
@@ -33,7 +36,7 @@ const _volumeKey = 'volume';
 //  - rec_dir:       output folder; null/empty ⇒ the OS Downloads folder.
 const _recBufferingKey = 'rec_buffering';
 const _recBufferMbKey = 'rec_buffer_mb';
-const _recDirKey = 'rec_dir';
+// rec_dir lives in storage_paths.dart (recDirKey) since recordingsDir() reads it.
 const _recBufferMbDefault = 50;
 // Recordings-library playback toggles (the _RecordingsPage view).
 const _recNeverStopsKey = 'rec_never_stops'; // auto-play the next file at end
@@ -81,7 +84,7 @@ void main() async {
   }
 
   // On desktop, restore the saved window size before showing the window.
-  if (_isDesktop) {
+  if (isDesktop) {
     await windowManager.ensureInitialized();
     final prefs = await SharedPreferences.getInstance();
     final w = prefs.getDouble(_winWidthKey);
@@ -317,6 +320,12 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   Station? _current;
   bool _loading = false;
   String _nowPlaying = ''; // raw "Artist - Title" string from the stream
+  // State of the ICY metadata side-channel; drives the now-playing message when
+  // there's no title yet (connecting / unsupported / failed / waiting).
+  MetadataStatus _metaStatus = MetadataStatus.idle;
+  // Monotonic play-session id: bumped on every _play so late async work from a
+  // superseded station (a fast switch) can't update the UI / history / recording.
+  int _playSession = 0;
   double _volume = 1.0; // 0.0–1.0
   // Last title written to the play history; the ICY reader re-emits the same
   // title every metadata tick, so we dedup against this to log a song once.
@@ -324,7 +333,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
 
   // Stream recorder + UI state. The ICY reader re-emits the same title each tick,
   // so track-change handling dedups against _lastRecTitle (mirrors history).
-  final _recorder = _StreamRecorder();
+  final _recorder = StreamRecorder();
   bool _recording = false;
   bool _recBuffering = true; // mirrors _recBufferingKey; gates the Record button
   String _lastRecTitle = '';
@@ -342,14 +351,9 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   @override
   void initState() {
     super.initState();
-    if (_isDesktop) windowManager.addListener(this);
-    _icy.onTitle = (title) {
-      if (!mounted) return;
-      setState(() => _nowPlaying = title);
-      _recordHistory(title);
-      _handleTrackChange(title);
-    };
-    _icy.onAudio = _recorder.addAudio;
+    if (isDesktop) windowManager.addListener(this);
+    // ICY callbacks are wired per-station in _play (with a session guard); see
+    // there. Just the output-folder resolver and the service hook here.
     _recorder.outputDirResolver = _resolveOutputDir;
     // Receive notification-button taps relayed from the foreground service.
     if (Platform.isAndroid) {
@@ -515,7 +519,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     final seen = _stations.map((s) => s.url).toSet();
     final toAdd = <Station>[];
     var skipped = 0;
-    for (final r in _parseCsv(content)) {
+    for (final r in parseCsv(content)) {
       if (r.length < 2) continue;
       final name = r[0].trim();
       final url = r[1].trim();
@@ -550,7 +554,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     }
     final csv = StringBuffer('name,url\n');
     for (final s in _stations) {
-      csv.writeln('${_csvField(s.name)},${_csvField(s.url)}');
+      csv.writeln('${csvField(s.name)},${csvField(s.url)}');
     }
     final bytes = utf8.encode(csv.toString());
 
@@ -563,7 +567,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
         allowedExtensions: ['csv'],
         // Mobile can't hand back a writable path, so file_picker writes these
         // bytes itself; on desktop it returns the path and we write below.
-        bytes: _isDesktop ? null : bytes,
+        bytes: isDesktop ? null : bytes,
       );
     } catch (e) {
       _snack('Export failed: $e');
@@ -572,7 +576,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     if (path == null) return; // user cancelled
 
     try {
-      if (_isDesktop) await File(path).writeAsString(csv.toString());
+      if (isDesktop) await File(path).writeAsString(csv.toString());
       _snack('Exported ${_stations.length} station(s).');
     } catch (e) {
       _snack('Export failed: $e');
@@ -582,7 +586,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   @override
   void dispose() {
     _resizeDebounce?.cancel();
-    if (_isDesktop) windowManager.removeListener(this);
+    if (isDesktop) windowManager.removeListener(this);
     _searchController.dispose();
     _searchFocus.dispose();
     _pageFocus.dispose();
@@ -641,18 +645,23 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   }
 
   Future<void> _play(Station station) async {
-    // Switching station ends any in-progress recording (spec: a station change
-    // stops recording) — finalize it before we retune.
-    final saved = await _recorder.onStreamStopped();
+    // A new session: any late work from the previous station (a fast switch)
+    // checks this id and bails before touching UI / history / recording state.
+    final session = ++_playSession;
     setState(() {
       _current = station;
       _loading = true;
       _nowPlaying = '';
+      _metaStatus = MetadataStatus.connecting;
       _lastHistoryTitle =
           ''; // new session: let the first song log even if same
       _lastRecTitle = ''; // reset the recorder's track-change dedup
       _recording = false;
     });
+    // Switching station ends any in-progress recording (spec: a station change
+    // stops recording) — finalize it before we retune.
+    final saved = await _recorder.onStreamStopped();
+    if (session != _playSession) return; // superseded while finalizing
     if (saved != null) _snack('Saved recording: ${_baseName(saved)}');
     try {
       await _player.setUrl(station.url);
@@ -663,14 +672,47 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
       // returned promptly, so this only surfaced on Android/ExoPlayer.)
       unawaited(_player.play());
     } catch (e) {
+      // Playback failed: return to the stopped state instead of looking like
+      // we're playing and waiting for track info. Don't start the buffer, the
+      // metadata reader, or the foreground service for a station that isn't on.
+      if (session != _playSession || !mounted) return;
+      setState(() {
+        _current = null;
+        _loading = false;
+        _nowPlaying = '';
+        _metaStatus = MetadataStatus.idle;
+        _lastHistoryTitle = '';
+        _lastRecTitle = '';
+        _recording = false;
+      });
       _snack('Could not play ${station.name}: $e');
-    } finally {
-      if (mounted) setState(() => _loading = false);
+      unawaited(_syncPlaybackService()); // _current == null ⇒ tears it down
+      return;
     }
+    if (session != _playSession || !mounted) return; // superseded
+    setState(() => _loading = false);
     // Start a fresh buffer (if enabled) before audio flows, then the metadata/
-    // audio reader. Both are best-effort on a separate connection.
+    // audio reader. Both are best-effort on a separate connection. The callbacks
+    // are session-guarded so a stale connection can't write into current state.
     await _recorder.startBuffering();
-    _icy.start(station.url);
+    if (session != _playSession) return;
+    _icy.start(
+      station.url,
+      onTitle: (title) {
+        if (session != _playSession || !mounted) return;
+        setState(() {
+          _nowPlaying = title;
+          _metaStatus = MetadataStatus.active;
+        });
+        _recordHistory(title);
+        _handleTrackChange(title);
+      },
+      onAudio: _recorder.addAudio,
+      onStatus: (status) {
+        if (session != _playSession || !mounted) return;
+        setState(() => _metaStatus = status);
+      },
+    );
     // Raise (or refresh) the playback foreground service for this station.
     unawaited(_syncPlaybackService());
   }
@@ -682,12 +724,14 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   }
 
   Future<void> _stop() async {
+    _playSession++; // invalidate any in-flight _play / metadata callbacks
     await _player.stop();
     await _icy.stop();
     final saved = await _recorder.onStreamStopped();
     setState(() {
       _current = null;
       _nowPlaying = '';
+      _metaStatus = MetadataStatus.idle;
       _lastHistoryTitle = '';
       _lastRecTitle = '';
       _recording = false;
@@ -792,6 +836,24 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   String _baseName(String path) =>
       path.split(Platform.pathSeparator).last;
 
+  /// Message shown in the now-playing box when there's no title yet — distinct
+  /// per metadata state so the user can tell "still connecting" from "this
+  /// station has no track info" from "the metadata connection failed".
+  String _metaStatusMessage() {
+    switch (_metaStatus) {
+      case MetadataStatus.idle:
+      case MetadataStatus.connecting:
+        return 'Connecting…';
+      case MetadataStatus.unsupported:
+        return 'This station doesn\'t provide track info.';
+      case MetadataStatus.failed:
+        return 'Track info unavailable.';
+      case MetadataStatus.waitingForFirstTitle:
+      case MetadataStatus.active:
+        return 'Waiting for track info…';
+    }
+  }
+
   /// Append a song to the play history the first time we see its title for the
   /// current session. Fires from [IcyReader.onTitle] (which re-emits the same
   /// title each metadata tick — hence the dedup). Best-effort, like metadata.
@@ -804,7 +866,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     // _lastHistoryTitle so re-enabling mid-song still logs the current track.
     if (!(_prefs?.getBool(_historyLoggingKey) ?? true)) return;
     _lastHistoryTitle = rawTitle;
-    final parts = _splitArtistTitle(rawTitle);
+    final parts = splitArtistTitle(rawTitle);
     final row = [
       DateTime.now().toIso8601String(),
       station.name,
@@ -812,7 +874,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
       parts.title,
       '', // album (not available from ICY)
       rawTitle, // raw, as a fallback
-    ].map(_csvField).join(',');
+    ].map(csvField).join(',');
     try {
       final file = await historyFile();
       if (!await file.exists()) {
@@ -832,7 +894,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
 
     // ICY only gives us "Artist - Title". Album is rarely present, so it stays
     // empty unless you later add a per-station metadata source.
-    final parts = _splitArtistTitle(_nowPlaying);
+    final parts = splitArtistTitle(_nowPlaying);
     final artist = parts.artist;
     final title = parts.title;
 
@@ -843,7 +905,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
       title,
       '', // album (not available from ICY)
       _nowPlaying, // raw, as a fallback
-    ].map(_csvField).join(',');
+    ].map(csvField).join(',');
 
     try {
       final file = await savedTracksFile();
@@ -1051,11 +1113,9 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
                           Text(
                             _loading
                                 ? 'Connecting…'
-                                : (_nowPlaying.isEmpty
-                                    ? (playing
-                                        ? 'Waiting for track info…'
-                                        : '—')
-                                    : _nowPlaying),
+                                : (_nowPlaying.isNotEmpty
+                                    ? _nowPlaying
+                                    : (playing ? _metaStatusMessage() : '—')),
                             style: Theme.of(context).textTheme.headlineSmall,
                             textAlign: TextAlign.center,
                           ),
@@ -1330,7 +1390,7 @@ class _RecordingSettingsPageState extends State<_RecordingSettingsPage> {
       _prefs = prefs;
       _buffering = prefs.getBool(_recBufferingKey) ?? true;
       _bufferMb = prefs.getInt(_recBufferMbKey) ?? _recBufferMbDefault;
-      _dir = prefs.getString(_recDirKey);
+      _dir = prefs.getString(recDirKey);
     });
   }
 
@@ -1361,12 +1421,12 @@ class _RecordingSettingsPageState extends State<_RecordingSettingsPage> {
     final picked = path;
     if (picked == null) return; // cancelled
     setState(() => _dir = picked);
-    await _prefs?.setString(_recDirKey, picked);
+    await _prefs?.setString(recDirKey, picked);
   }
 
   Future<void> _resetDir() async {
     setState(() => _dir = null);
-    await _prefs?.remove(_recDirKey);
+    await _prefs?.remove(recDirKey);
   }
 
   @override
@@ -1410,11 +1470,11 @@ class _RecordingSettingsPageState extends State<_RecordingSettingsPage> {
             subtitle: Text(
               hasDir
                   ? _dir!
-                  : (_isDesktop
+                  : (isDesktop
                       ? 'Downloads folder (default)'
                       : 'App folder — share recordings from the file manager'),
             ),
-            trailing: _isDesktop
+            trailing: isDesktop
                 ? Wrap(
                     spacing: 4,
                     children: [
@@ -1431,7 +1491,7 @@ class _RecordingSettingsPageState extends State<_RecordingSettingsPage> {
                   )
                 : null,
           ),
-          if (!_isDesktop)
+          if (!isDesktop)
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
               child: Text(
@@ -1559,7 +1619,7 @@ class _RecordingsPageState extends State<_RecordingsPage> {
     final name = _fileName(f);
     final dot = name.lastIndexOf('.');
     final base = dot > 0 ? name.substring(0, dot) : name;
-    return _splitArtistTitle(base);
+    return splitArtistTitle(base);
   }
 
   String _label(File f) {
@@ -1725,7 +1785,7 @@ class _RecordingsPageState extends State<_RecordingsPage> {
     final csv = StringBuffer('artist,title\n');
     for (final f in _files) {
       final p = _parts(f);
-      csv.writeln('${_csvField(p.artist)},${_csvField(p.title)}');
+      csv.writeln('${csvField(p.artist)},${csvField(p.title)}');
     }
     final bytes = utf8.encode(csv.toString());
     String? path;
@@ -1735,7 +1795,7 @@ class _RecordingsPageState extends State<_RecordingsPage> {
         fileName: 'ez_tunein_recordings.csv',
         type: FileType.custom,
         allowedExtensions: ['csv'],
-        bytes: _isDesktop ? null : bytes,
+        bytes: isDesktop ? null : bytes,
       );
     } catch (e) {
       _snack('Export failed: $e');
@@ -1743,7 +1803,7 @@ class _RecordingsPageState extends State<_RecordingsPage> {
     }
     if (path == null) return; // cancelled
     try {
-      if (_isDesktop) await File(path).writeAsString(csv.toString());
+      if (isDesktop) await File(path).writeAsString(csv.toString());
       _snack('Exported ${_files.length} recording(s).');
     } catch (e) {
       _snack('Export failed: $e');
@@ -1833,12 +1893,6 @@ class _RecordingsPageState extends State<_RecordingsPage> {
     }
   }
 
-  static String _fmtDur(Duration d) {
-    final m = d.inMinutes;
-    final s = d.inSeconds % 60;
-    return '$m:${s.toString().padLeft(2, '0')}';
-  }
-
   /// A draggable progress bar for the playing file: current position on the left,
   /// total length on the right, slide anywhere to seek. Position ticks come from
   /// the player; while dragging we show the drag value and seek on release.
@@ -1855,7 +1909,7 @@ class _RecordingsPageState extends State<_RecordingsPage> {
         final value = _seekDragMs ?? posMs;
         return Row(
           children: [
-            Text(_fmtDur(Duration(milliseconds: value.round())),
+            Text(fmtDuration(Duration(milliseconds: value.round())),
                 style: Theme.of(context).textTheme.bodySmall),
             Expanded(
               // The default inactive track is the surface-variant grey, which is
@@ -1883,7 +1937,7 @@ class _RecordingsPageState extends State<_RecordingsPage> {
                 ),
               ),
             ),
-            Text(_fmtDur(total),
+            Text(fmtDuration(total),
                 style: Theme.of(context).textTheme.bodySmall),
           ],
         );
@@ -1918,7 +1972,7 @@ class _RecordingsPageState extends State<_RecordingsPage> {
       appBar: AppBar(
         title: const Text('Recordings'),
         actions: [
-          if (_isDesktop)
+          if (isDesktop)
             IconButton(
               icon: const Icon(Icons.folder_open),
               tooltip: 'Open recordings folder',
@@ -2054,7 +2108,7 @@ class _RecordingsPageState extends State<_RecordingsPage> {
                           itemBuilder: (ctx) => [
                             // Sharing files isn't supported by share_plus on
                             // desktop Linux; the folder button covers that there.
-                            if (!_isDesktop)
+                            if (!isDesktop)
                               const PopupMenuItem(
                                 value: 'share',
                                 child: ListTile(
@@ -2081,84 +2135,6 @@ class _RecordingsPageState extends State<_RecordingsPage> {
       ),
     );
   }
-}
-
-/// Resolve the folder recordings are written to / read from: the user's chosen
-/// folder (`rec_dir`), else the OS Downloads folder, falling back to the app
-/// documents dir (e.g. Android, where an arbitrary Downloads path isn't writable
-/// without extra plumbing). Shared by the recorder and the recordings library.
-Future<Directory> recordingsDir() async {
-  final prefs = await SharedPreferences.getInstance();
-  final custom = prefs.getString(_recDirKey);
-  if (custom != null && custom.trim().isNotEmpty) return Directory(custom);
-  if (_isDesktop) {
-    final dl = await getDownloadsDirectory();
-    if (dl != null) return dl;
-  }
-  return getApplicationDocumentsDirectory();
-}
-
-/// Audio file extensions the recordings library will list and play.
-const _audioExtensions = {
-  '.mp3',
-  '.aac',
-  '.m4a',
-  '.ogg',
-  '.opus',
-  '.flac',
-  '.wav',
-};
-
-bool _isAudioFile(String path) {
-  final dot = path.lastIndexOf('.');
-  if (dot < 0) return false;
-  return _audioExtensions.contains(path.substring(dot).toLowerCase());
-}
-
-/// List the audio files in the recordings folder, sorted by name (≈ artist then
-/// title, since recordings are named "Artist - Title.ext"). Best-effort: returns
-/// an empty list if the folder is missing or unreadable.
-Future<List<File>> listRecordings() async {
-  try {
-    final dir = await recordingsDir();
-    if (!await dir.exists()) return [];
-    final files = <File>[];
-    await for (final e in dir.list(followLinks: false)) {
-      if (e is File && _isAudioFile(e.path)) files.add(e);
-    }
-    files.sort(
-        (a, b) => a.path.toLowerCase().compareTo(b.path.toLowerCase()));
-    return files;
-  } catch (_) {
-    return [];
-  }
-}
-
-/// The CSV file where saved tracks are appended. Shared by the player (writes)
-/// and the saved-tracks view (reads / clears).
-Future<File> savedTracksFile() async {
-  final dir = await getApplicationDocumentsDirectory();
-  return File('${dir.path}/radio_saved_tracks.csv');
-}
-
-/// The CSV file where every played song is logged automatically. Same format as
-/// the saved-tracks CSV; written by the player, read/cleared by the history view.
-Future<File> historyFile() async {
-  final dir = await getApplicationDocumentsDirectory();
-  return File('${dir.path}/radio_history.csv');
-}
-
-/// Split a raw ICY "Artist - Title" string on the first " - "; if there's no
-/// separator the whole string is the title and the artist is empty.
-({String artist, String title}) _splitArtistTitle(String raw) {
-  final sep = raw.indexOf(' - ');
-  if (sep > 0) {
-    return (
-      artist: raw.substring(0, sep).trim(),
-      title: raw.substring(sep + 3).trim(),
-    );
-  }
-  return (artist: '', title: raw);
 }
 
 /// One saved track. [timestamp] is kept as the raw ISO-8601 string (which sorts
@@ -2231,7 +2207,7 @@ class _TrackListPageState extends State<_TrackListPage> {
     final file = await widget.fileResolver();
     final tracks = <SavedTrack>[];
     if (await file.exists()) {
-      final rows = _parseCsv(await file.readAsString());
+      final rows = parseCsv(await file.readAsString());
       // Row 0 is the header (timestamp,station,artist,title,album,raw); skip it.
       for (final r in rows.skip(1)) {
         if (r.length < 4) continue;
@@ -2408,7 +2384,7 @@ class _TrackListPageState extends State<_TrackListPage> {
         ..showSnackBar(const SnackBar(content: Text('Nothing to export yet.')));
       return;
     }
-    if (_isDesktop) {
+    if (isDesktop) {
       await Clipboard.setData(ClipboardData(text: file.path));
       if (!mounted) return;
       ScaffoldMessenger.of(context)
@@ -2493,7 +2469,7 @@ class _TrackListPageState extends State<_TrackListPage> {
               DataRow(
                 onSelectChanged: (_) => _copy(t),
                 cells: [
-                  DataCell(Text(_fmtDateTime(t.timestamp))),
+                  DataCell(Text(fmtDateTime(t.timestamp))),
                   DataCell(Text(t.station)),
                   DataCell(Text(t.artist)),
                   DataCell(Text(t.title)),
@@ -2524,7 +2500,7 @@ class _TrackListPageState extends State<_TrackListPage> {
             overflow: TextOverflow.ellipsis,
           ),
           subtitle: Text(
-            '${t.station} · ${_fmtDateTime(t.timestamp)}',
+            '${t.station} · ${fmtDateTime(t.timestamp)}',
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: TextStyle(color: scheme.onSurfaceVariant),
@@ -2555,7 +2531,7 @@ class _TrackListPageState extends State<_TrackListPage> {
             ),
             // The compact phone list has no column headers, so sorting moves
             // here. (record = (columnIndex, ascending) — see _onSort.)
-            if (!_isDesktop)
+            if (!isDesktop)
               PopupMenuButton<(int, bool)>(
                 icon: const Icon(Icons.sort),
                 tooltip: 'Sort',
@@ -2570,8 +2546,8 @@ class _TrackListPageState extends State<_TrackListPage> {
                 ],
               ),
             IconButton(
-              icon: Icon(_isDesktop ? Icons.folder_open : Icons.share),
-              tooltip: _isDesktop ? 'Show file location' : 'Share',
+              icon: Icon(isDesktop ? Icons.folder_open : Icons.share),
+              tooltip: isDesktop ? 'Show file location' : 'Share',
               onPressed: _tracks.isEmpty ? null : _export,
             ),
             IconButton(
@@ -2623,405 +2599,8 @@ class _TrackListPageState extends State<_TrackListPage> {
         ),
       );
     }
-    return _isDesktop
+    return isDesktop
         ? _buildDataTable(visible)
         : _buildCompactList(context, visible);
-  }
-}
-
-/// Formats an ISO-8601 timestamp as "YYYY-MM-DD HH:MM"; returns it unchanged
-/// if it can't be parsed.
-String _fmtDateTime(String iso) {
-  final dt = DateTime.tryParse(iso);
-  if (dt == null) return iso;
-  String two(int n) => n.toString().padLeft(2, '0');
-  return '${dt.year}-${two(dt.month)}-${two(dt.day)} '
-      '${two(dt.hour)}:${two(dt.minute)}';
-}
-
-/// Minimal RFC 4180 CSV parser: handles quoted fields, escaped quotes (""),
-/// and embedded commas/newlines. Returns rows of string fields.
-List<List<String>> _parseCsv(String input) {
-  final rows = <List<String>>[];
-  var row = <String>[];
-  var field = StringBuffer();
-  var inQuotes = false;
-
-  for (var i = 0; i < input.length; i++) {
-    final c = input[i];
-    if (inQuotes) {
-      if (c == '"') {
-        if (i + 1 < input.length && input[i + 1] == '"') {
-          field.write('"');
-          i++;
-        } else {
-          inQuotes = false;
-        }
-      } else {
-        field.write(c);
-      }
-    } else if (c == '"') {
-      inQuotes = true;
-    } else if (c == ',') {
-      row.add(field.toString());
-      field = StringBuffer();
-    } else if (c == '\n') {
-      row.add(field.toString());
-      field = StringBuffer();
-      rows.add(row);
-      row = <String>[];
-    } else if (c != '\r') {
-      field.write(c);
-    }
-  }
-  if (field.isNotEmpty || row.isNotEmpty) {
-    row.add(field.toString());
-    rows.add(row);
-  }
-  return rows;
-}
-
-/// Escapes a single CSV field per RFC 4180 (quote if it contains a comma,
-/// quote, or newline; double any embedded quotes).
-String _csvField(String value) {
-  if (value.contains(RegExp(r'[",\n\r]'))) {
-    return '"${value.replaceAll('"', '""')}"';
-  }
-  return value;
-}
-
-/// Reads ICY (Shoutcast/Icecast) inline metadata from a stream URL and reports
-/// each `StreamTitle` via [onTitle].
-///
-/// This is intentionally independent of the audio backend: it opens its own
-/// HTTP connection with the `Icy-MetaData: 1` header and parses the metadata
-/// blocks the server interleaves into the audio. Because of that it behaves
-/// identically on Windows, Linux, and Android — unlike just_audio's
-/// icyMetadataStream, which is only populated on mobile/macOS.
-///
-/// Trade-off: this downloads the stream a second time (audio bytes are read and
-/// discarded to reach the metadata). At ~128 kbps that is negligible.
-class IcyReader {
-  HttpClient? _client;
-  StreamSubscription<List<int>>? _sub;
-
-  /// Called with the raw "Artist - Title" string each time it changes.
-  void Function(String title)? onTitle;
-
-  /// Called with each batch of pure audio bytes (metadata stripped) as they
-  /// arrive. The recorder hooks this to buffer the stream; left null when nobody
-  /// is recording so the bytes are simply discarded as before.
-  void Function(List<int> audioBytes)? onAudio;
-
-  /// MIME type (e.g. `audio/mpeg`) and bitrate of the current stream, taken from
-  /// the response headers. Best-effort: either may be null. Used to choose the
-  /// recording file extension and to show the rate in the recording settings.
-  String? contentType;
-  int? bitrateKbps;
-
-  Future<void> start(String url) async {
-    await stop();
-    contentType = null;
-    bitrateKbps = null;
-    final client = HttpClient();
-    _client = client;
-    try {
-      final req = await client.getUrl(Uri.parse(url));
-      req.headers.set('Icy-MetaData', '1');
-      req.headers.set('User-Agent', 'radio-app');
-      final resp = await req.close();
-
-      contentType = resp.headers.value('content-type')?.trim();
-      bitrateKbps = int.tryParse(resp.headers.value('icy-br') ?? '');
-      final metaInt =
-          int.tryParse(resp.headers.value('icy-metaint') ?? '') ?? 0;
-      if (metaInt <= 0) {
-        // Server isn't sending interleaved metadata; nothing to read.
-        return;
-      }
-      _parseStream(resp, metaInt);
-    } catch (_) {
-      // Metadata is best-effort; playback continues regardless.
-      await stop();
-    }
-  }
-
-  void _parseStream(Stream<List<int>> stream, int metaInt) {
-    // Byte-level state machine: skip `metaInt` audio bytes, read 1 length byte
-    // (× 16 = metadata block size), read that many metadata bytes, repeat.
-    var bytesUntilMeta = metaInt;
-    var metaRemaining = 0;
-    final metaBuf = <int>[];
-    var inMeta = false;
-    var readingLen = false;
-
-    _sub = stream.listen(
-      (chunk) {
-        // Forward contiguous runs of audio bytes (everything that isn't a length
-        // byte or metadata) to onAudio in batches rather than byte-by-byte.
-        var audioStart = -1;
-        void flushAudio(int end) {
-          if (audioStart >= 0) {
-            onAudio?.call(chunk.sublist(audioStart, end));
-            audioStart = -1;
-          }
-        }
-
-        for (var i = 0; i < chunk.length; i++) {
-          final b = chunk[i];
-          if (readingLen) {
-            flushAudio(i); // the length byte ends the current audio run
-            metaRemaining = b * 16;
-            readingLen = false;
-            if (metaRemaining == 0) {
-              bytesUntilMeta = metaInt;
-            } else {
-              metaBuf.clear();
-              inMeta = true;
-            }
-          } else if (inMeta) {
-            metaBuf.add(b);
-            metaRemaining--;
-            if (metaRemaining == 0) {
-              _emit(metaBuf);
-              inMeta = false;
-              bytesUntilMeta = metaInt;
-            }
-          } else {
-            if (audioStart < 0) audioStart = i;
-            bytesUntilMeta--;
-            if (bytesUntilMeta == 0) {
-              readingLen = true;
-            }
-          }
-        }
-        flushAudio(chunk.length); // trailing audio run in this chunk
-      },
-      onError: (_) {},
-      cancelOnError: false,
-    );
-  }
-
-  void _emit(List<int> bytes) {
-    // Strip the null/space padding the server appends after the fields.
-    final text =
-        utf8.decode(bytes, allowMalformed: true).replaceAll('\x00', '');
-    // Prefer anchoring the end on the next field (StreamUrl=) so a title that
-    // itself contains "';" isn't cut short; fall back to a plain match.
-    final match = RegExp("StreamTitle='(.*?)';StreamUrl=").firstMatch(text) ??
-        RegExp("StreamTitle='(.*?)';").firstMatch(text);
-    final title = match?.group(1)?.trim() ?? '';
-    if (title.isNotEmpty) onTitle?.call(title);
-  }
-
-  Future<void> stop() async {
-    await _sub?.cancel();
-    _sub = null;
-    _client?.close(force: true);
-    _client = null;
-  }
-}
-
-/// Buffers the live audio of the current track to a temp file so the user can
-/// record a song they're already partway through, then writes the finished song
-/// to the output folder. The player feeds it audio via [IcyReader.onAudio] and
-/// tells it when the track changes or playback stops.
-///
-/// Per track: bytes accumulate into a temp buffer file (capped at
-/// [bufferCapBytes] until armed; oldest bytes dropped). [arm] marks "record this
-/// song" — the buffer already holds the song so far and keeps growing, ignoring
-/// the cap. [onTrackChanged]/[onStreamStopped] finalize an armed recording (move
-/// the buffer into the output folder) and clear the buffer for the next track.
-///
-/// Recording is lossless: Icecast/Shoutcast bytes are already compressed
-/// (MP3/AAC), so they're written verbatim — no decoding or re-encoding.
-class _StreamRecorder {
-  // Config, pushed in from prefs by the player.
-  bool bufferingEnabled = true;
-  int bufferCapBytes = 50 * 1024 * 1024;
-  Future<Directory> Function()? outputDirResolver;
-
-  File? _buffer;
-  RandomAccessFile? _raf;
-  int _bytes = 0;
-  bool _armed = false;
-  String _title = '';
-  String _station = '';
-  String _ext = 'mp3';
-
-  bool get isRecording => _armed;
-
-  Future<File> _bufferFile() async {
-    final dir = await getTemporaryDirectory();
-    return File('${dir.path}/ez_record_buffer.part');
-  }
-
-  /// Begin (or restart) buffering for a fresh track. No-op when buffering is off.
-  Future<void> startBuffering() async {
-    if (!bufferingEnabled) return;
-    _armed = false;
-    await _closeRaf();
-    final f = await _bufferFile();
-    // FileMode.write truncates and allows reading (needed by the cap trim).
-    _raf = f.openSync(mode: FileMode.write);
-    _buffer = f;
-    _bytes = 0;
-  }
-
-  /// Append a batch of audio bytes (called from [IcyReader.onAudio]). Synchronous
-  /// so the stream listener stays in order; best-effort, write errors ignored.
-  void addAudio(List<int> bytes) {
-    final raf = _raf;
-    if (!bufferingEnabled || raf == null) return;
-    try {
-      raf.writeFromSync(bytes);
-      _bytes += bytes.length;
-      // Until recording is armed, keep only the most recent ~bufferCapBytes so a
-      // marathon single "track" can't grow without bound. Hysteresis (1.25×)
-      // keeps the rare rewrite infrequent. While armed we keep everything.
-      if (!_armed && _bytes > bufferCapBytes + (bufferCapBytes >> 2)) {
-        _trimToTail();
-      }
-    } catch (_) {
-      // Buffering is best-effort, like metadata — ignore write failures.
-    }
-  }
-
-  void _trimToTail() {
-    final raf = _raf;
-    if (raf == null) return;
-    try {
-      raf.flushSync();
-      final len = raf.lengthSync();
-      if (len <= bufferCapBytes) return;
-      raf.setPositionSync(len - bufferCapBytes);
-      final tail = raf.readSync(bufferCapBytes);
-      raf.truncateSync(0);
-      raf.setPositionSync(0);
-      raf.writeFromSync(tail);
-      _bytes = tail.length;
-    } catch (_) {
-      // If the trim fails, leave the buffer as-is rather than dropping it.
-    }
-  }
-
-  /// Mark the current track to be recorded. The buffer already holds the song so
-  /// far; from now on bytes are kept regardless of the cap.
-  void arm(String title, String station, String? contentType) {
-    if (!bufferingEnabled || _raf == null) return;
-    _armed = true;
-    _title = title;
-    _station = station;
-    _ext = _extFor(contentType);
-  }
-
-  /// Discard an in-progress recording but keep buffering the same track (so the
-  /// user can re-arm). The cap applies again once disarmed.
-  void cancel() => _armed = false;
-
-  /// Finalize an armed recording (if any) and start a clean buffer for the next
-  /// track. Returns the saved file path, or null if nothing was recording.
-  Future<String?> onTrackChanged() async {
-    final path = await _finalizeIfArmed();
-    await startBuffering();
-    return path;
-  }
-
-  /// Finalize an armed recording (if any) and tear the buffer down (stream ended
-  /// or the station was switched).
-  Future<String?> onStreamStopped() async {
-    final path = await _finalizeIfArmed();
-    await _closeRaf();
-    await _deleteBuffer();
-    return path;
-  }
-
-  Future<void> dispose() async {
-    await _closeRaf();
-    await _deleteBuffer();
-  }
-
-  Future<String?> _finalizeIfArmed() async {
-    if (!_armed) return null;
-    _armed = false;
-    await _closeRaf();
-    final src = _buffer;
-    if (src == null || !await src.exists()) return null;
-    try {
-      final dir = await outputDirResolver!();
-      if (!await dir.exists()) await dir.create(recursive: true);
-      final outPath = await _uniquePath(dir, _fileNameBase(), _ext);
-      // Move the buffer into place: rename on the same volume, else copy+delete.
-      try {
-        await src.rename(outPath);
-      } on FileSystemException {
-        await src.copy(outPath);
-        try {
-          await src.delete();
-        } catch (_) {}
-      }
-      _buffer = null; // moved away; startBuffering() will make a fresh one
-      return outPath;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  Future<void> _closeRaf() async {
-    final raf = _raf;
-    _raf = null;
-    if (raf == null) return;
-    try {
-      raf.flushSync();
-      raf.closeSync();
-    } catch (_) {}
-  }
-
-  Future<void> _deleteBuffer() async {
-    final f = _buffer;
-    _buffer = null;
-    if (f == null) return;
-    try {
-      if (await f.exists()) await f.delete();
-    } catch (_) {}
-  }
-
-  String _fileNameBase() {
-    final parts = _splitArtistTitle(_title);
-    final raw = parts.artist.isEmpty
-        ? parts.title
-        : '${parts.artist} - ${parts.title}';
-    final cleaned = _sanitize(raw);
-    if (cleaned.isNotEmpty) return cleaned;
-    return _sanitize(_station.isEmpty ? 'recording' : _station);
-  }
-
-  /// Strip filesystem-illegal characters and control codes; collapse whitespace
-  /// and cap the length so the name is safe on Windows, Linux, and Android.
-  static String _sanitize(String s) {
-    final cleaned = s
-        .replaceAll(RegExp(r'[\\/:*?"<>|\x00-\x1f]'), '_')
-        .replaceAll(RegExp(r'\s+'), ' ')
-        .trim();
-    return cleaned.length > 120 ? cleaned.substring(0, 120).trim() : cleaned;
-  }
-
-  static String _extFor(String? contentType) {
-    final ct = (contentType ?? '').toLowerCase();
-    if (ct.contains('aac')) return 'aac'; // audio/aac, audio/aacp
-    if (ct.contains('ogg')) return 'ogg';
-    if (ct.contains('mpeg') || ct.contains('mp3')) return 'mp3';
-    return 'mp3'; // sensible default; most stations are MP3
-  }
-
-  static Future<String> _uniquePath(
-      Directory dir, String base, String ext) async {
-    final sep = Platform.pathSeparator;
-    var candidate = '${dir.path}$sep$base.$ext';
-    if (!await File(candidate).exists()) return candidate;
-    for (var n = 2;; n++) {
-      candidate = '${dir.path}$sep$base ($n).$ext';
-      if (!await File(candidate).exists()) return candidate;
-    }
   }
 }

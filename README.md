@@ -13,7 +13,9 @@ Runs on **Windows**, **Linux**, and **Android**.
   recording) with the screen off — a notification shows what's on with a **Stop**
   button, so you can pocket the phone and let the music run.
 - **Live "now playing"** — see the current artist and track update as the music
-  changes.
+  changes. If a station doesn't broadcast track info, the app says so plainly
+  instead of leaving you guessing, and it quietly reconnects if the metadata feed
+  drops.
 - **Save the songs you like** — one click logs the current track.
 - **Record a whole song** — hit **Record** and EZ-TuneIn saves the song to a file
   (mp3), *including the part that already played* before you pressed the button (it

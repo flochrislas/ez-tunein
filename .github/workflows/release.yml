@@ -30,8 +30,25 @@ env:
   FLUTTER_VERSION: '3.44.1'
 
 jobs:
+  # ----------------------------------------------------------------- Verify
+  # Gate the whole release on a clean analyze + test run, so a broken commit
+  # can't be tagged into published artifacts. The platform jobs `needs:` this.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test
+
   # ---------------------------------------------------------------- Android
   android:
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -82,6 +99,7 @@ jobs:
 
   # ------------------------------------------------------------------ Linux
   linux:
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -113,6 +131,7 @@ jobs:
 
   # ---------------------------------------------------------------- Windows
   windows:
+    needs: verify
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5

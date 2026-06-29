@@ -42,8 +42,9 @@ A minimalist internet-radio player:
 - **Station list import/export:** `file_picker` (native open/save dialogs on all
   three platforms; on Linux it shells out to `zenity`/`kdialog`).
 
-Everything lives in a single file, **`lib/main.dart`** — the app is small enough
-that splitting it would add more ceremony than clarity.
+The UI lives in **`lib/main.dart`**; the non-UI logic (ICY parsing, recording,
+CSV, paths, text helpers) was extracted into small sibling modules so it's
+independently unit-testable. See the [Code map](#code-map).
 
 ## The key design decision: metadata is decoupled from playback
 
@@ -56,7 +57,7 @@ relying on it would mean the core "save the song" feature silently returns
 nothing on the two main platforms.
 
 So metadata is handled independently of the audio backend by **`IcyReader`**
-(bottom of `main.dart`):
+(`lib/icy_reader.dart`):
 
 - It opens its **own** HTTP connection to the stream with the header
   `Icy-MetaData: 1`.
@@ -76,15 +77,54 @@ Those same audio bytes are what the recorder taps — `IcyReader` forwards them
 (batched, metadata stripped) through `onAudio`, and exposes the stream's
 `contentType`/`bitrateKbps` from the response headers. See [Recording](#recording).
 
-`IcyReader.onTitle` is a simple callback the UI sets; playback continues
+The byte-level state machine itself lives in a **pure `IcyParser`** (no I/O), so
+it's unit-tested directly (`test/icy_reader_test.dart`); `IcyReader` is the thin
+HTTP + lifecycle wrapper around it.
+
+`IcyReader.start(url, …)` takes the `onTitle`/`onAudio`/`onStatus` callbacks as
+parameters; the player passes closures from `_play`. Playback continues
 regardless of whether metadata succeeds (it's best-effort and swallows errors).
+Lifecycle hardening (added after a code review):
+
+- **Staleness guard.** Fast station switches used to risk a stale connection
+  overwriting a newer title. Now there are two layers: the player tags each
+  `_play` with a `_playSession` id that its closures check, and `IcyReader`
+  bumps an internal `_generation` on every `start`/`stop` so a superseded
+  connection — and any pending reconnect timer — is inert.
+- **Status, not one message.** `MetadataStatus`
+  (idle/connecting/waitingForFirstTitle/unsupported/failed/active) is reported via
+  `onStatus`. The now-playing box distinguishes "still connecting", "this station
+  sends no `icy-metaint`" → *"doesn't provide track info"*, and a failed/dead
+  connection → *"unavailable"* — instead of a blanket *"Waiting for track info…"*.
+  A non-empty title always takes precedence, so a brief reconnect never blanks it.
+- **Auto-reconnect.** If the metadata socket drops (`onDone`/`onError`) while the
+  station is still current, it reconnects with bounded exponential backoff
+  (~5 tries, capped at 30 s; a fresh title refills the budget). This is what fixes
+  the screen-off case where the next-track signal — and thus a recording's
+  finalize — would otherwise never arrive.
 
 > Note: stream "listen" links are often `.pls`/`.m3u` playlists, not the audio
 > itself. `just_audio` and `IcyReader` both need the **direct** stream URL. For
 > example, SwissGroove's `listen.php` is an M3U pointing at
 > `http://relay1.swissgroove.ch:80`, which is what the app actually uses.
 
-## Code map (`lib/main.dart`)
+## Code map
+
+The non-UI logic was extracted from the once-single `main.dart` into small,
+independently testable modules; `main.dart` keeps the UI and the player/session
+controller. Modules:
+
+| File | Owns |
+|---|---|
+| `lib/main.dart` | UI, `_PlayerPageState` (player/session controller), all page widgets. |
+| `lib/icy_reader.dart` | `MetadataStatus`, pure `IcyParser`, `IcyReader`. |
+| `lib/stream_recorder.dart` | `StreamRecorder` + filename/extension/unique-path statics. |
+| `lib/storage_paths.dart` | `isDesktop`, `recDirKey`, `recordingsDir`, `savedTracksFile`, `historyFile`, `listRecordings`, `isAudioFile`. |
+| `lib/csv_utils.dart` | `parseCsv` / `csvField`. |
+| `lib/track_utils.dart` | `splitArtistTitle`, `fmtDateTime`, `fmtDuration`. |
+| `test/` | Unit tests for the modules above. |
+
+Key symbols:
 
 | Symbol | Role |
 |---|---|
@@ -99,14 +139,15 @@ regardless of whether metadata succeeds (it's best-effort and swallows errors).
 | `_importStations` / `_exportStations` | Import/export the station list as a `name,url` CSV via `file_picker`. |
 | `_StationDialog` | Minimal name + URL dialog; returns a `Station`. Pre-fills from `initial` to edit (vs. add). |
 | `_TrackListPage` / `SavedTrack` | The shared sortable/searchable table screen, used for **both** saved tracks and play history (parameterized by `title` / `fileResolver` / `emptyMessage` / `shareSubject` / `isHistory`). `_export` shares the CSV (share sheet on mobile, reveal-in-folder on desktop); `_historyControls` adds the count + logging toggle when `isHistory`. |
-| `IcyReader` | The ICY metadata reader described above; also forwards audio bytes via `onAudio` and reports `contentType`/`bitrateKbps`. |
-| `_StreamRecorder` | Buffers the live audio to a temp file and finalizes a recording to `Artist - Title.<ext>` (see [Recording](#recording)). |
+| `IcyParser` | Pure byte-level ICY state machine (no I/O); unit-tested. |
+| `IcyReader` | HTTP + lifecycle wrapper around `IcyParser`: forwards audio bytes via `onAudio`, reports `contentType`/`bitrateKbps` and `MetadataStatus`, and auto-reconnects a dropped metadata socket. |
+| `StreamRecorder` | Buffers the live audio to a temp file and finalizes a recording to `Artist - Title.<ext>` (see [Recording](#recording)). |
 | `_RecordingSettingsPage` | The recording-settings screen (buffering toggle, buffer size, output folder); writes the `rec_*` prefs. |
 | `_RecordingsPage` | The recordings library — lists/plays the files in the output folder with never-stops / randomize / skip / export (see [Recordings library](#recordings-library)). |
-| `recordingsDir()` / `listRecordings()` / `_isAudioFile` | Locate the recordings folder (shared by the recorder + library) and list its audio files. |
+| `recordingsDir()` / `listRecordings()` / `isAudioFile` | Locate the recordings folder (shared by the recorder + library) and list its audio files. |
 | `savedTracksFile()` / `historyFile()` | Resolve the two CSV paths (`radio_saved_tracks.csv` / `radio_history.csv`). |
-| `_splitArtistTitle` | Splits a raw ICY `"Artist - Title"` string; shared by save, history, and recording filenames. |
-| `_parseCsv` / `_csvField` | RFC-4180 CSV read/write (no dependency). |
+| `splitArtistTitle` | Splits a raw ICY `"Artist - Title"` string; shared by save, history, and recording filenames. |
+| `parseCsv` / `csvField` | RFC-4180 CSV read/write (no dependency). |
 | `_fmtDateTime` | Formats the ISO timestamp as `YYYY-MM-DD HH:MM`. |
 
 ## Data & persistence
@@ -197,12 +238,12 @@ radio station…"), built by `_actionTile`. Both use **`file_picker`** for the
 native dialogs:
 
 - **Export** (`_exportStations`): builds a `name,url` CSV (header row +
-  `_csvField`-escaped rows) and opens a save dialog. On desktop `saveFile`
+  `csvField`-escaped rows) and opens a save dialog. On desktop `saveFile`
   returns the chosen path and we `writeAsString`; on mobile there's no writable
   path, so we hand `file_picker` the `bytes` and it writes the file itself.
 - **Import** (`_importStations`): opens a file picker (`withData: true` so mobile
   gets the bytes), reads the file (`bytes` on mobile, `path` on desktop), parses
-  it with the shared `_parseCsv`, and **merges non-destructively** — it skips any
+  it with the shared `parseCsv`, and **merges non-destructively** — it skips any
   URL already present (same dedup rule as add) and tolerates an optional
   `name,url` header. A snackbar reports how many were imported vs. skipped.
 
@@ -221,7 +262,7 @@ from the **clock** icon in the app bar.
   when the title changes; `_lastHistoryTitle` resets in `_play`/`_stop` so a new
   session (or the same song on another station) logs afresh. A song is captured
   the moment its info arrives — even a brief listen counts. Rows reuse
-  `_splitArtistTitle` + `_csvField` and the saved-tracks header; writes are
+  `splitArtistTitle` + `csvField` and the saved-tracks header; writes are
   best-effort (errors swallowed), like metadata. The history is **unbounded** —
   it grows one row per song until cleared.
 - **Logging toggle.** A `history_logging` bool (default on) gates recording. It's
@@ -253,13 +294,17 @@ current track, so "record" just commits the buffer and keeps going.
   no way to *change* the bitrate (it's always the stream's own). The file
   extension comes from the response `Content-Type` (`audio/mpeg` → `.mp3`,
   `audio/aac`/`aacp` → `.aac`, else `.mp3`).
-- **The buffer (`_StreamRecorder`).** While a stream plays and buffering is on, the
+- **The buffer (`StreamRecorder`).** While a stream plays and buffering is on, the
   current track's audio is appended to a temp file in `getTemporaryDirectory()`.
   Until you arm recording it's capped at `rec_buffer_mb` MB: once it grows past
-  ~1.25× the cap it's trimmed to the most recent `cap` bytes (a rare, cheap
-  rewrite — songs are a few MB, so this only bites pathological single "tracks").
-  Writes are **synchronous** (`RandomAccessFile.writeFromSync`) so the stream
-  listener stays in order; like metadata, errors are swallowed.
+  ~1.25× the cap it's trimmed to the most recent `cap` bytes. Per-chunk writes are
+  **synchronous** (`RandomAccessFile.writeFromSync`) so the stream listener stays
+  in order; like metadata, errors are swallowed. The **trim itself is deferred**
+  off the hot audio callback (`Timer.run`, guarded by `_trimScheduled`) — it reads
+  up to `cap` bytes, so running it inline on a big buffer could stutter the UI;
+  deferring also coalesces bursts. It still runs synchronously once scheduled, so
+  it stays atomic against appends on the single isolate. (A full async/isolate
+  offload is a possible future step — see [next steps](#known-limitations--possible-next-steps).)
 - **Arm → finalize.** `_toggleRecord` calls `arm()`, capturing the title/station
   and marking the buffer to be kept regardless of the cap. The recording is
   finalized — the buffer file moved (rename, else copy+delete) to
@@ -336,8 +381,8 @@ A small local jukebox for the recorded files (`_RecordingsPage`, opened from the
   so the radio and a recording never sound at the same time.
 - **Listing & metadata.** `listRecordings()` scans `recordingsDir()` (the same
   folder the recorder writes to) and keeps files whose extension passes
-  `_isAudioFile`, sorted by name. There are no audio tags — artist/title come purely
-  from the filename via `_splitArtistTitle` (recordings are `Artist - Title.ext`); a
+  `isAudioFile`, sorted by name. There are no audio tags — artist/title come purely
+  from the filename via `splitArtistTitle` (recordings are `Artist - Title.ext`); a
   file not in that shape shows its whole name as the title.
 - **Playback & auto-advance.** `_playAt` uses `setFilePath` + un-awaited `play()`
   (same endless-stream gotcha caveat — though these are finite, completion is read
@@ -405,8 +450,25 @@ With a sizeable default list, the station list has a live name filter:
   latter). Setup, the `play()` gotcha, and release signing (done — upload keystore
   via CI secrets) live in [`android-build.md`](./android-build.md).
 
+## Tests & CI
+
+- **Unit tests** (`test/`) cover the extracted, pure logic: the `IcyParser` byte
+  state machine (metadata split across chunks, audio split exactly at the
+  `metaint` boundary, zero-length blocks, `StreamTitle` with/without `StreamUrl`,
+  no empty titles), the CSV read/write round-trip, the recorder's filename
+  sanitisation / extension / unique-path helpers, and the track-text helpers. Run
+  with `~/flutter/bin/flutter test`. The UI is not widget-tested (it needs audio /
+  a display this environment lacks).
+- **CI** (`.github/workflows/ci.yml`) runs `flutter analyze` + `flutter test` +
+  a debug Linux build on every push/PR. The **release** workflow gates on the same
+  `verify` job (analyze + test) before it builds any platform artifacts, so a
+  broken commit can't be tagged into a published release.
+
 ## Known limitations / possible next steps
 
+- **Recorder buffer trim** runs on the UI isolate (deferred + coalesced, but not
+  truly async). A long-term improvement is async batched I/O or a dedicated
+  isolate — keeping the raw-byte design (no transcoding).
 - Stations can be added/removed/edited but not **reordered**.
 - No URL validation beyond non-empty; a bad URL surfaces as a "Could not play"
   snackbar.

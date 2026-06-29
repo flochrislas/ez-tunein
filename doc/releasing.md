@@ -16,6 +16,11 @@ The workflow builds each on its own cloud runner (Windows can't be cross-compile
 from Linux — this is why we automate it), then publishes a **draft** release for
 review before anything goes public.
 
+A `verify` job (`flutter analyze` + `flutter test`) runs first; the three platform
+build jobs `needs:` it, so a tag whose code fails analyze or tests never produces
+artifacts. The same checks run on every push/PR via
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml).
+
 ## One-time setup (already done — for reference / new machines)
 
 1. **Android signing.** Run [`script/android-signing-setup.sh`](../script/android-signing-setup.sh)
@@ -59,8 +64,8 @@ review before anything goes public.
    > your version-bump commit to `main` first). The tag (`v0.1.1`) and the
    > `pubspec.yaml` version (`0.1.1`) must match.
 
-3. **Watch the run** (~5–10 min; four jobs: `android`, `linux`, `windows`,
-   `release`):
+3. **Watch the run** (~5–10 min; five jobs: `verify`, then `android`, `linux`,
+   `windows`, then `release`):
 
    ```bash
    gh run watch $(gh run list --workflow=release.yml -L1 --json databaseId -q '.[0].databaseId')
