@@ -1,20 +1,32 @@
-import 'dart:async';
 import 'dart:io';
 
 import 'package:path_provider/path_provider.dart';
 
 import 'track_utils.dart';
 
-/// Buffers the live audio of the current track to a temp file so the user can
-/// record a song they're already partway through, then writes the finished song
-/// to the output folder. The player feeds it audio via [IcyReader.onAudio] and
-/// tells it when the track changes or playback stops.
+/// One on-disk buffer segment: a file plus how many bytes have been written to
+/// it. The live track's audio is spread across a sequence of these.
+class _Segment {
+  _Segment(this.file);
+  final File file;
+  int bytes = 0;
+}
+
+/// Buffers the live audio of the current track to disk so the user can record a
+/// song they're already partway through, then writes the finished song to the
+/// output folder. The player feeds it audio via [IcyReader.onAudio] and tells it
+/// when the track changes or playback stops.
 ///
-/// Per track: bytes accumulate into a temp buffer file (capped at
-/// [bufferCapBytes] until armed; oldest bytes dropped). [arm] marks "record this
-/// song" — the buffer already holds the song so far and keeps growing, ignoring
-/// the cap. [onTrackChanged]/[onStreamStopped] finalize an armed recording (move
-/// the buffer into the output folder) and clear the buffer for the next track.
+/// **Segmented ring buffer.** Rather than one growing file that gets rewritten
+/// to enforce the cap (a big synchronous read + rewrite — and RAM spike — on the
+/// UI isolate), the buffer is a sequence of fixed-size segment files. New audio
+/// appends to the active segment; when it fills, a new one is rolled. Until
+/// recording is armed, the *oldest* whole segment is dropped (an O(1) file
+/// delete, no read) once the remaining segments still cover [bufferCapBytes], so
+/// the retained "rewind" window stays in `[cap, cap + segment)` with no spike.
+/// When [arm]ed, nothing is dropped (the whole song is kept) and, on finalize,
+/// the live segments are concatenated (streamed in 1 MB chunks — bounded memory)
+/// into `<output>/Artist - Title.<ext>`.
 ///
 /// Recording is lossless: Icecast/Shoutcast bytes are already compressed
 /// (MP3/AAC), so they're written verbatim — no decoding or re-encoding.
@@ -24,79 +36,100 @@ class StreamRecorder {
   int bufferCapBytes = 50 * 1024 * 1024;
   Future<Directory> Function()? outputDirResolver;
 
-  File? _buffer;
-  RandomAccessFile? _raf;
-  int _bytes = 0;
+  /// Folder for the on-disk buffer segments. Overridable for tests; defaults to
+  /// the OS temp dir.
+  Future<Directory> Function() bufferDirResolver = getTemporaryDirectory;
+
+  /// Segment size override (bytes). Tests set a tiny value to exercise rolling /
+  /// dropping; null ⇒ derived from [bufferCapBytes] (see [_segmentSizeBytes]).
+  int? segmentBytesOverride;
+
+  Directory? _tmpDir;
+  final List<_Segment> _segments = [];
+  RandomAccessFile? _raf; // append handle to _segments.last
+  int _segSeq = 0; // names segment files uniquely within a session
+  int _totalBytes = 0; // sum across all current segments
+  bool _swept = false; // cleaned crash-leftover segment files once?
   bool _armed = false;
-  // The cap-trim is heavy (it reads up to bufferCapBytes), so it must not run
-  // inside the hot audio callback. We defer it with Timer.run and guard against
-  // overlapping trims with this flag. Trim still runs synchronously once it
-  // starts, so it stays atomic against the (synchronous) appends on this isolate.
-  bool _trimScheduled = false;
   String _title = '';
   String _station = '';
   String _ext = 'mp3';
 
   bool get isRecording => _armed;
 
-  Future<File> _bufferFile() async {
-    final dir = await getTemporaryDirectory();
-    return File('${dir.path}/ez_record_buffer.part');
+  /// Total bytes currently buffered across all segments. Exposed for tests.
+  int get bufferedBytes => _totalBytes;
+
+  static const _segmentFilePrefix = 'ez_record_buffer.';
+
+  /// Active segment size. Derived as ~⅛ of the cap (so ~8 segments span the
+  /// window) but clamped to a sane 1–16 MB; overridable for tests.
+  int get _segmentSizeBytes {
+    if (segmentBytesOverride != null) return segmentBytesOverride!;
+    const mb = 1024 * 1024;
+    return (bufferCapBytes ~/ 8).clamp(mb, 16 * mb);
   }
 
   /// Begin (or restart) buffering for a fresh track. No-op when buffering is off.
   Future<void> startBuffering() async {
     if (!bufferingEnabled) return;
     _armed = false;
-    await _closeRaf();
-    final f = await _bufferFile();
-    // FileMode.write truncates and allows reading (needed by the cap trim).
-    _raf = f.openSync(mode: FileMode.write);
-    _buffer = f;
-    _bytes = 0;
+    await _closeAndDeleteAll();
+    _tmpDir ??= await bufferDirResolver();
+    if (!_swept) {
+      _sweepStaleSegments(); // remove any leftovers from a crashed session
+      _swept = true;
+    }
+    _segSeq = 0;
+    _totalBytes = 0;
+    _openNewSegment();
   }
 
-  /// Append a batch of audio bytes (called from [IcyReader.onAudio]). The write
-  /// is synchronous so the stream stays in order; best-effort, errors ignored.
+  /// Append a batch of audio bytes (called from [IcyReader.onAudio]). Synchronous
+  /// so the stream stays in order; best-effort, write errors ignored. All the
+  /// work here is cheap — an append, an occasional segment roll (open/close), and
+  /// O(1) deletes of whole old segments. No big read/rewrite, so no UI hitch.
   void addAudio(List<int> bytes) {
     final raf = _raf;
     if (!bufferingEnabled || raf == null) return;
     try {
       raf.writeFromSync(bytes);
-      _bytes += bytes.length;
-      // Until recording is armed, keep only the most recent ~bufferCapBytes so a
-      // marathon single "track" can't grow without bound. Hysteresis (1.25×)
-      // keeps the rare rewrite infrequent. While armed we keep everything.
-      // Defer the (heavy) trim off this hot callback and coalesce bursts.
-      if (!_armed &&
-          !_trimScheduled &&
-          _bytes > bufferCapBytes + (bufferCapBytes >> 2)) {
-        _trimScheduled = true;
-        Timer.run(_trimToTail);
-      }
+      _segments.last.bytes += bytes.length;
+      _totalBytes += bytes.length;
+      if (_segments.last.bytes >= _segmentSizeBytes) _rollSegment();
+      // While not armed, drop the oldest whole segment(s) once the rest still
+      // covers the rewind window. While armed we keep everything.
+      if (!_armed) _dropOldSegments();
     } catch (_) {
       // Buffering is best-effort, like metadata — ignore write failures.
     }
   }
 
-  void _trimToTail() {
+  void _openNewSegment() {
+    final f = File('${_tmpDir!.path}/$_segmentFilePrefix$_segSeq.part');
+    _segSeq++;
+    // FileMode.write truncates any stale file and allows reading (for finalize).
+    _raf = f.openSync(mode: FileMode.write);
+    _segments.add(_Segment(f));
+  }
+
+  void _rollSegment() {
     try {
-      final raf = _raf;
-      // Recording may have been armed/stopped between scheduling and running.
-      if (raf == null || _armed) return;
-      raf.flushSync();
-      final len = raf.lengthSync();
-      if (len <= bufferCapBytes) return;
-      raf.setPositionSync(len - bufferCapBytes);
-      final tail = raf.readSync(bufferCapBytes);
-      raf.truncateSync(0);
-      raf.setPositionSync(0);
-      raf.writeFromSync(tail);
-      _bytes = tail.length;
-    } catch (_) {
-      // If the trim fails, leave the buffer as-is rather than dropping it.
-    } finally {
-      _trimScheduled = false;
+      _raf?.flushSync();
+      _raf?.closeSync();
+    } catch (_) {}
+    _raf = null;
+    _openNewSegment();
+  }
+
+  void _dropOldSegments() {
+    // Never drop the active (last) segment; drop the oldest only while doing so
+    // still leaves >= cap bytes, so the retained window never falls below cap.
+    while (_segments.length > 1 &&
+        _totalBytes - _segments.first.bytes >= bufferCapBytes) {
+      final old = _segments.removeAt(0);
+      _totalBytes -= old.bytes;
+      _deleteFileQuietly(old.file);
     }
   }
 
@@ -126,36 +159,57 @@ class StreamRecorder {
   /// or the station was switched).
   Future<String?> onStreamStopped() async {
     final path = await _finalizeIfArmed();
-    await _closeRaf();
-    await _deleteBuffer();
+    await _closeAndDeleteAll();
     return path;
   }
 
   Future<void> dispose() async {
-    await _closeRaf();
-    await _deleteBuffer();
+    await _closeAndDeleteAll();
   }
 
   Future<String?> _finalizeIfArmed() async {
     if (!_armed) return null;
     _armed = false;
-    await _closeRaf();
-    final src = _buffer;
-    if (src == null || !await src.exists()) return null;
+    await _closeRaf(); // close the active segment; keep the files for the move
+    if (_segments.isEmpty) return null;
     try {
       final dir = await outputDirResolver!();
       if (!await dir.exists()) await dir.create(recursive: true);
       final outPath = await uniqueFilePath(dir, _fileNameBase(), _ext);
-      // Move the buffer into place: rename on the same volume, else copy+delete.
-      try {
-        await src.rename(outPath);
-      } on FileSystemException {
-        await src.copy(outPath);
+      if (_segments.length == 1) {
+        // Fast path (short song = one segment): move it, no copy.
+        final src = _segments.first.file;
         try {
-          await src.delete();
-        } catch (_) {}
+          await src.rename(outPath);
+        } on FileSystemException {
+          await src.copy(outPath);
+          _deleteFileQuietly(src);
+        }
+      } else {
+        // Concatenate segments in order, streamed in chunks (bounded memory).
+        final out = File(outPath).openSync(mode: FileMode.write);
+        try {
+          for (final seg in _segments) {
+            if (!seg.file.existsSync()) continue;
+            final src = seg.file.openSync(mode: FileMode.read);
+            try {
+              const chunk = 1024 * 1024;
+              while (true) {
+                final data = src.readSync(chunk);
+                if (data.isEmpty) break;
+                out.writeFromSync(data);
+              }
+            } finally {
+              src.closeSync();
+            }
+          }
+        } finally {
+          out.closeSync();
+        }
+        _deleteAllSegments();
       }
-      _buffer = null; // moved away; startBuffering() will make a fresh one
+      _segments.clear();
+      _totalBytes = 0;
       return outPath;
     } catch (_) {
       return null;
@@ -172,12 +226,37 @@ class StreamRecorder {
     } catch (_) {}
   }
 
-  Future<void> _deleteBuffer() async {
-    final f = _buffer;
-    _buffer = null;
-    if (f == null) return;
+  Future<void> _closeAndDeleteAll() async {
+    await _closeRaf();
+    _deleteAllSegments();
+    _totalBytes = 0;
+  }
+
+  void _deleteAllSegments() {
+    for (final seg in _segments) {
+      _deleteFileQuietly(seg.file);
+    }
+    _segments.clear();
+  }
+
+  void _deleteFileQuietly(File f) {
     try {
-      if (await f.exists()) await f.delete();
+      if (f.existsSync()) f.deleteSync();
+    } catch (_) {}
+  }
+
+  /// Remove buffer segment files left over from a previous (crashed) session.
+  void _sweepStaleSegments() {
+    final dir = _tmpDir;
+    if (dir == null) return;
+    try {
+      for (final e in dir.listSync(followLinks: false)) {
+        if (e is File &&
+            e.uri.pathSegments.last.startsWith(_segmentFilePrefix) &&
+            e.path.endsWith('.part')) {
+          _deleteFileQuietly(e);
+        }
+      }
     } catch (_) {}
   }
 

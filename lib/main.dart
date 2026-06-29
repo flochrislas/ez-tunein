@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
@@ -37,7 +38,10 @@ const _volumeKey = 'volume';
 const _recBufferingKey = 'rec_buffering';
 const _recBufferMbKey = 'rec_buffer_mb';
 // rec_dir lives in storage_paths.dart (recDirKey) since recordingsDir() reads it.
-const _recBufferMbDefault = 50;
+const _recBufferMbDefault = 35;
+// Cap the buffer so the synchronous trim (reads ~cap bytes into RAM) can't cause
+// a large memory spike / UI hitch. See doc/implementation-notes.md.
+const _recBufferMbMax = 128;
 // Recordings-library playback toggles (the _RecordingsPage view).
 const _recNeverStopsKey = 'rec_never_stops'; // auto-play the next file at end
 const _recRandomizeKey = 'rec_randomize'; // pick the next file at random
@@ -381,9 +385,11 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     final savedVolume = prefs.getDouble(_volumeKey);
     if (savedVolume != null) await _player.setVolume(savedVolume);
 
-    // Recording config (defaults: buffering on, 50 MB, Downloads folder).
+    // Recording config (defaults: buffering on, 35 MB, Downloads folder). Clamp
+    // to _recBufferMbMax so an old saved value above the new cap is still bounded.
     final buffering = prefs.getBool(_recBufferingKey) ?? true;
-    final bufMb = prefs.getInt(_recBufferMbKey) ?? _recBufferMbDefault;
+    final bufMb =
+        (prefs.getInt(_recBufferMbKey) ?? _recBufferMbDefault).clamp(5, _recBufferMbMax);
     _recorder.bufferingEnabled = buffering;
     _recorder.bufferCapBytes = bufMb * 1024 * 1024;
 
@@ -416,7 +422,8 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     final prefs = _prefs;
     if (prefs == null) return;
     final buffering = prefs.getBool(_recBufferingKey) ?? true;
-    final bufMb = prefs.getInt(_recBufferMbKey) ?? _recBufferMbDefault;
+    final bufMb =
+        (prefs.getInt(_recBufferMbKey) ?? _recBufferMbDefault).clamp(5, _recBufferMbMax);
     final was = _recBuffering;
     _recorder.bufferingEnabled = buffering;
     _recorder.bufferCapBytes = bufMb * 1024 * 1024;
@@ -1389,7 +1396,8 @@ class _RecordingSettingsPageState extends State<_RecordingSettingsPage> {
     setState(() {
       _prefs = prefs;
       _buffering = prefs.getBool(_recBufferingKey) ?? true;
-      _bufferMb = prefs.getInt(_recBufferMbKey) ?? _recBufferMbDefault;
+      _bufferMb =
+          (prefs.getInt(_recBufferMbKey) ?? _recBufferMbDefault).clamp(5, _recBufferMbMax);
       _dir = prefs.getString(recDirKey);
     });
   }
@@ -1429,13 +1437,51 @@ class _RecordingSettingsPageState extends State<_RecordingSettingsPage> {
     await _prefs?.remove(recDirKey);
   }
 
+  /// A compact reference so the user can size the buffer sensibly: how much a
+  /// minute of MP3 costs at common bitrates, and what the current buffer holds.
+  /// (A minute = kbps × 7500 bytes; MB here is MiB, matching the cap maths.)
+  Widget _bufferGuide(Color muted) {
+    String perMin(int kbps) => (kbps * 7500 / 1048576).toStringAsFixed(1);
+    String mins(int kbps) =>
+        (_bufferMb * 1048576 / (kbps * 7500)).round().toString();
+    final style = TextStyle(color: muted, fontSize: 12);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(24, 0, 16, 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '1 min of MP3 ≈ ${perMin(128)} MB (128k) · '
+            '${perMin(256)} MB (256k) · ${perMin(320)} MB (320k)',
+            style: style,
+          ),
+          const SizedBox(height: 2),
+          Text(
+            '→ $_bufferMb MB rewinds ≈ ${mins(128)} / ${mins(256)} / ${mins(320)} '
+            'min (128 / 256 / 320k)',
+            style: style,
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final muted = Theme.of(context).colorScheme.onSurfaceVariant;
     final hasDir = _dir != null && _dir!.trim().isNotEmpty;
     return Scaffold(
       appBar: AppBar(title: const Text('Recording settings')),
-      body: ListView(
+      // Wait for prefs before building the controls — otherwise the slider paints
+      // at the default and then visibly animates to the saved value on open.
+      body: _prefs == null
+          ? const Center(child: CircularProgressIndicator())
+          : _buildSettings(muted, hasDir),
+    );
+  }
+
+  Widget _buildSettings(Color muted, bool hasDir) {
+    return ListView(
         padding: const EdgeInsets.all(8),
         children: [
           SwitchListTile(
@@ -1450,20 +1496,21 @@ class _RecordingSettingsPageState extends State<_RecordingSettingsPage> {
             title: const Text('Buffer size'),
             subtitle: Text(
               '$_bufferMb MB — how far back into a song you can reach when you '
-              'hit Record (≈1 min ≈ 1 MB at 128 kbps).',
+              'hit Record.',
               style: TextStyle(color: _buffering ? null : muted),
             ),
           ),
           Slider(
-            value: _bufferMb.clamp(5, 500).toDouble(),
+            value: _bufferMb.clamp(5, _recBufferMbMax).toDouble(),
             min: 5,
-            max: 500,
-            divisions: 99,
+            max: _recBufferMbMax.toDouble(),
+            divisions: _recBufferMbMax - 5, // 1 MB steps
             label: '$_bufferMb MB',
             onChanged:
                 _buffering ? (v) => setState(() => _bufferMb = v.round()) : null,
             onChangeEnd: _buffering ? (v) => _setBufferMb(v.round()) : null,
           ),
+          _bufferGuide(muted),
           const Divider(),
           ListTile(
             title: const Text('Save recordings to'),
@@ -1514,8 +1561,7 @@ class _RecordingSettingsPageState extends State<_RecordingSettingsPage> {
             ),
           ),
         ],
-      ),
-    );
+      );
   }
 }
 
@@ -2189,25 +2235,63 @@ class _TrackListPageState extends State<_TrackListPage> {
   // History only: whether the player is currently logging played songs.
   bool _logging = true;
 
+  // Paged rendering: the whole CSV is parsed up front (cheap, text), but only a
+  // window of rows is built into widgets at a time so a long history (the file is
+  // unbounded) doesn't materialise thousands of DataRows on open. The window
+  // grows as you scroll near the bottom (or tap "Show more"); it resets whenever
+  // the filter/sort changes the ordering or membership.
+  static const _pageSize = 200;
+  int _visibleCount = _pageSize;
+  final _scrollController = ScrollController();
+
   @override
   void initState() {
     super.initState();
+    _scrollController.addListener(_onScroll);
     _load();
   }
 
   @override
   void dispose() {
+    _scrollController.dispose();
     _searchController.dispose();
     _searchFocus.dispose();
     _pageFocus.dispose();
     super.dispose();
   }
 
+  // Grow the window when the user scrolls within ~300px of the bottom.
+  void _onScroll() {
+    if (!_scrollController.hasClients) return;
+    final pos = _scrollController.position;
+    if (pos.pixels >= pos.maxScrollExtent - 300) _showMore();
+  }
+
+  void _showMore() {
+    final total = _visible.length;
+    if (_visibleCount >= total) return;
+    setState(() => _visibleCount = (_visibleCount + _pageSize).clamp(0, total));
+  }
+
+  // Filter/sort changed the list — start the window over from the top.
+  void _resetWindow() {
+    _visibleCount = _pageSize;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _scrollController.hasClients) _scrollController.jumpTo(0);
+    });
+  }
+
   Future<void> _load() async {
     final file = await widget.fileResolver();
     final tracks = <SavedTrack>[];
     if (await file.exists()) {
-      final rows = parseCsv(await file.readAsString());
+      final content = await file.readAsString();
+      // History is unbounded; parse a large CSV on a background isolate so the UI
+      // thread stays responsive on open. Small files parse inline (no isolate
+      // spin-up / string-copy overhead).
+      final rows = content.length > 256 * 1024
+          ? await compute(parseCsv, content)
+          : parseCsv(content);
       // Row 0 is the header (timestamp,station,artist,title,album,raw); skip it.
       for (final r in rows.skip(1)) {
         if (r.length < 4) continue;
@@ -2224,6 +2308,7 @@ class _TrackListPageState extends State<_TrackListPage> {
       _tracks = tracks;
       _loading = false;
       _logging = logging;
+      _visibleCount = _pageSize;
     });
   }
 
@@ -2323,7 +2408,10 @@ class _TrackListPageState extends State<_TrackListPage> {
         controller: _searchController,
         focusNode: _searchFocus,
         autofocus: true,
-        onChanged: (v) => setState(() => _query = v),
+        onChanged: (v) => setState(() {
+          _query = v;
+          _resetWindow();
+        }),
         textInputAction: TextInputAction.search,
         decoration: InputDecoration(
           isDense: true,
@@ -2358,6 +2446,7 @@ class _TrackListPageState extends State<_TrackListPage> {
         }
         return ascending ? r : -r;
       });
+      _resetWindow();
     });
   }
 
@@ -2447,36 +2536,59 @@ class _TrackListPageState extends State<_TrackListPage> {
     setState(() => _tracks = []);
   }
 
-  /// Desktop layout: the full sortable table (a wide window can scroll if it
-  /// ever needs to).
-  Widget _buildDataTable(List<SavedTrack> rows) {
-    return SingleChildScrollView(
-      scrollDirection: Axis.vertical,
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: DataTable(
-          sortColumnIndex: _sortColumn,
-          sortAscending: _ascending,
-          showCheckboxColumn: false,
-          columns: [
-            DataColumn(label: const Text('When'), onSort: _onSort),
-            DataColumn(label: const Text('Radio station'), onSort: _onSort),
-            DataColumn(label: const Text('Artist'), onSort: _onSort),
-            DataColumn(label: const Text('Title'), onSort: _onSort),
-          ],
-          rows: [
-            for (final t in rows)
-              DataRow(
-                onSelectChanged: (_) => _copy(t),
-                cells: [
-                  DataCell(Text(fmtDateTime(t.timestamp))),
-                  DataCell(Text(t.station)),
-                  DataCell(Text(t.artist)),
-                  DataCell(Text(t.title)),
-                ],
-              ),
-          ],
+  /// A "Showing X of Y — Show more" footer below a windowed list. Scrolling near
+  /// the bottom already grows the window (`_onScroll`); this is the explicit
+  /// fallback / progress indicator.
+  Widget _moreFooter(int shown, int total) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 14),
+      child: Center(
+        child: TextButton.icon(
+          onPressed: _showMore,
+          icon: const Icon(Icons.expand_more),
+          label: Text('Show more  ·  $shown of $total'),
         ),
+      ),
+    );
+  }
+
+  /// Desktop layout: the sortable table. Only [rows] (the current window) are
+  /// built into DataRows; [hasMore] adds a Show-more footer (of [total] matches).
+  Widget _buildDataTable(List<SavedTrack> rows, bool hasMore, int total) {
+    return SingleChildScrollView(
+      controller: _scrollController,
+      scrollDirection: Axis.vertical,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: DataTable(
+              sortColumnIndex: _sortColumn,
+              sortAscending: _ascending,
+              showCheckboxColumn: false,
+              columns: [
+                DataColumn(label: const Text('When'), onSort: _onSort),
+                DataColumn(label: const Text('Radio station'), onSort: _onSort),
+                DataColumn(label: const Text('Artist'), onSort: _onSort),
+                DataColumn(label: const Text('Title'), onSort: _onSort),
+              ],
+              rows: [
+                for (final t in rows)
+                  DataRow(
+                    onSelectChanged: (_) => _copy(t),
+                    cells: [
+                      DataCell(Text(fmtDateTime(t.timestamp))),
+                      DataCell(Text(t.station)),
+                      DataCell(Text(t.artist)),
+                      DataCell(Text(t.title)),
+                    ],
+                  ),
+              ],
+            ),
+          ),
+          if (hasMore) _moreFooter(rows.length, total),
+        ],
       ),
     );
   }
@@ -2484,12 +2596,17 @@ class _TrackListPageState extends State<_TrackListPage> {
   /// Phone layout: a vertical list that never scrolls horizontally. Each row
   /// stacks "Artist — Title" over a muted "station · date" line; tapping copies
   /// "artist - title" (same as a table-row tap). Sorting is via the app-bar menu.
-  Widget _buildCompactList(BuildContext context, List<SavedTrack> rows) {
+  /// Only [rows] (the current window) are built; a Show-more footer is appended
+  /// when [hasMore] (of [total] matches).
+  Widget _buildCompactList(
+      BuildContext context, List<SavedTrack> rows, bool hasMore, int total) {
     final scheme = Theme.of(context).colorScheme;
     return ListView.separated(
-      itemCount: rows.length,
+      controller: _scrollController,
+      itemCount: rows.length + (hasMore ? 1 : 0),
       separatorBuilder: (_, __) => const Divider(height: 1),
       itemBuilder: (context, i) {
+        if (i >= rows.length) return _moreFooter(rows.length, total);
         final t = rows[i];
         final headline =
             t.artist.isEmpty ? t.title : '${t.artist} — ${t.title}';
@@ -2599,8 +2716,14 @@ class _TrackListPageState extends State<_TrackListPage> {
         ),
       );
     }
+    // Build only a window of rows so a long history stays cheap to render; the
+    // window grows on scroll / "Show more" (see _onScroll / _showMore).
+    final shown = _visibleCount < visible.length ? _visibleCount : visible.length;
+    final windowed =
+        shown == visible.length ? visible : visible.sublist(0, shown);
+    final hasMore = shown < visible.length;
     return isDesktop
-        ? _buildDataTable(visible)
-        : _buildCompactList(context, visible);
+        ? _buildDataTable(windowed, hasMore, visible.length)
+        : _buildCompactList(context, windowed, hasMore, visible.length);
   }
 }

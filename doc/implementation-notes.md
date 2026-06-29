@@ -264,7 +264,8 @@ from the **clock** icon in the app bar.
   the moment its info arrives — even a brief listen counts. Rows reuse
   `splitArtistTitle` + `csvField` and the saved-tracks header; writes are
   best-effort (errors swallowed), like metadata. The history is **unbounded** —
-  it grows one row per song until cleared.
+  it grows one row per song until cleared — so the view loads it lazily (see
+  *Paged rendering* below).
 - **Logging toggle.** A `history_logging` bool (default on) gates recording. It's
   toggled from the History view's control band (`_historyControls`, shown only
   when `isHistory`), which also displays the entry count. `_recordHistory` reads
@@ -279,6 +280,16 @@ from the **clock** icon in the app bar.
   Export and clear always act on the whole file, not the filtered view; the entry
   count is a snapshot taken when the view opens (no live refresh, like the rest of
   this screen).
+- **Paged rendering.** History is unbounded, so the view doesn't build every row
+  on open. The whole CSV is still parsed up front (cheap — and offloaded to a
+  background isolate via `compute` once it's over 256 KB, so the UI thread stays
+  responsive), but only a window of `_pageSize` (200) rows is built into widgets.
+  The window grows by a page when you scroll within ~300 px of the bottom
+  (`_onScroll` → `_showMore`) or tap the **Show more** footer, and resets to the
+  first page whenever the filter or sort changes the ordering/membership
+  (`_resetWindow`, which also jumps back to the top). Both layouts share one
+  `ScrollController`. This keeps open-time and memory flat regardless of how large
+  the history grows.
 
 ### Recording
 
@@ -296,21 +307,28 @@ current track, so "record" just commits the buffer and keeps going.
   `audio/aac`/`aacp` → `.aac`, else `.mp3`).
 - **The buffer (`StreamRecorder`).** While a stream plays and buffering is on, the
   current track's audio is appended to a temp file in `getTemporaryDirectory()`.
-  Until you arm recording it's capped at `rec_buffer_mb` MB: once it grows past
-  ~1.25× the cap it's trimmed to the most recent `cap` bytes. Per-chunk writes are
-  **synchronous** (`RandomAccessFile.writeFromSync`) so the stream listener stays
-  in order; like metadata, errors are swallowed. The **trim itself is deferred**
-  off the hot audio callback (`Timer.run`, guarded by `_trimScheduled`) — it reads
-  up to `cap` bytes, so running it inline on a big buffer could stutter the UI;
-  deferring also coalesces bursts. It still runs synchronously once scheduled, so
-  it stays atomic against appends on the single isolate. (A full async/isolate
-  offload is a possible future step — see [next steps](#known-limitations--possible-next-steps).)
+  It's a **segmented ring buffer**: audio appends to an active segment file and a
+  new segment is rolled when it fills (segment size ≈ ⅛ of the cap, clamped to
+  1–16 MB). Until you arm recording, the *oldest whole segment* is dropped — an
+  O(1) file delete, no read — once the remaining segments still cover
+  `rec_buffer_mb` MB, so the retained "rewind" window stays in `[cap, cap +
+  segment)`. Per-chunk writes are **synchronous** (`RandomAccessFile.writeFrom
+  Sync`) so the stream listener stays in order; like metadata, errors are
+  swallowed. This deliberately replaced an earlier single-file design that
+  enforced the cap by reading ~`cap` bytes into RAM and rewriting the file — a
+  recurrent multi-MB allocation + UI hitch on the isolate (worst for someone
+  doing something demanding alongside, e.g. gaming). The ring buffer has no such
+  spike: trimming is just a delete. `rec_buffer_mb` is still capped at
+  `_recBufferMbMax` (128 MB; an old saved value above it is clamped on read) to
+  bound disk use and the one-time finalize copy.
 - **Arm → finalize.** `_toggleRecord` calls `arm()`, capturing the title/station
-  and marking the buffer to be kept regardless of the cap. The recording is
-  finalized — the buffer file moved (rename, else copy+delete) to
-  `<output>/Artist - Title.<ext>`, de-duped with ` (2)` — when the track changes
+  and marking the buffer to be kept regardless of the cap (dropping is paused, so
+  the whole song is retained). The recording is finalized to
+  `<output>/Artist - Title.<ext>` (de-duped with ` (2)`) when the track changes
   (`onTrackChanged`), the stream stops (`_stop`), or the station is switched
-  (`_play` finalizes the old one first). A success snackbar names the saved file.
+  (`_play` finalizes the old one first). Finalize concatenates the live segments
+  in order, streamed in 1 MB chunks (bounded memory); a one-segment song takes a
+  rename fast path. A success snackbar names the saved file.
 - **Track-change detection.** Driven by the same `IcyReader.onTitle` as history,
   via `_handleTrackChange`, which dedups on `_lastRecTitle` (the reader re-emits
   each tick) and **skips the first title of a session** — that's the initial song,
@@ -364,7 +382,10 @@ current track, so "record" just commits the buffer and keeps going.
   writes the three `rec_*` prefs directly (same single-cached-instance trick as the
   history toggle). On pop the player calls `_applyRecordingPrefs`, which pushes the
   new cap/enabled state into the recorder and starts/stops live buffering if the
-  toggle flipped. Output folder defaults to `getDownloadsDirectory()` on desktop
+  toggle flipped. The buffer-size slider carries a `_bufferGuide` caption — the MB
+  cost of one minute of MP3 at 128/256/320 kbps, and how many minutes the chosen
+  size rewinds at each — so the number isn't an opaque "MB". Output folder
+  defaults to `getDownloadsDirectory()` on desktop
   (chosen via `file_picker`'s `getDirectoryPath`), falling back to the app
   documents dir; on Android it always uses the app folder (an arbitrary user folder
   needs SAF/MediaStore — not done).
@@ -466,16 +487,15 @@ With a sizeable default list, the station list has a live name filter:
 
 ## Known limitations / possible next steps
 
-- **Recorder buffer trim** runs on the UI isolate (deferred + coalesced, but not
-  truly async). A long-term improvement is async batched I/O or a dedicated
-  isolate — keeping the raw-byte design (no transcoding).
 - Stations can be added/removed/edited but not **reordered**.
 - No URL validation beyond non-empty; a bad URL surfaces as a "Could not play"
   snackbar.
 - The saved-tracks and history views are snapshots (no live refresh while open);
   the history entry count likewise reflects open-time.
 - Play history is **unbounded** — it grows until the user clears it (there's a
-  logging on/off toggle, but no automatic size cap or retention window).
+  logging on/off toggle, but no automatic size cap or retention window). The view
+  now loads it lazily (paged rendering + off-thread parse), so a large history is
+  cheap to open; a retention cap is still a possible future addition.
 - **Recording** keeps the stream's native bitrate/codec (no transcoding, by
   design). You can only capture from when you tuned in (joining mid-song records
   the remainder). On **Android** recordings save to the app folder — picking an
