@@ -57,8 +57,7 @@ Future<List<File>> listRecordings() async {
     await for (final e in dir.list(followLinks: false)) {
       if (e is File && isAudioFile(e.path)) files.add(e);
     }
-    files.sort(
-        (a, b) => a.path.toLowerCase().compareTo(b.path.toLowerCase()));
+    files.sort((a, b) => a.path.toLowerCase().compareTo(b.path.toLowerCase()));
     return files;
   } catch (_) {
     return [];

@@ -41,7 +41,8 @@ void main() {
 
     test('defaults to mp3', () {
       expect(StreamRecorder.extForContentType(null), 'mp3');
-      expect(StreamRecorder.extForContentType('application/octet-stream'), 'mp3');
+      expect(
+          StreamRecorder.extForContentType('application/octet-stream'), 'mp3');
     });
   });
 
@@ -91,7 +92,8 @@ void main() {
 
     test('armed recording keeps everything and finalizes in order', () async {
       await r.startBuffering();
-      r.addAudio(List.filled(150, 1)); // pre-arm audio (within cap, not dropped)
+      r.addAudio(
+          List.filled(150, 1)); // pre-arm audio (within cap, not dropped)
       r.arm('Artist - Song', 'Station', 'audio/mpeg');
       feed(r, 500, tag: 2); // post-arm audio, spans several segments
       final path = await r.onTrackChanged();
@@ -128,6 +130,35 @@ void main() {
       feed(r, 1000, tag: 4); // disarmed ⇒ trims back toward cap
       expect(r.bufferedBytes, lessThan(1000 + 200));
     });
+
+    test('overlapping finalize ops are serialized into one valid recording',
+        () async {
+      await r.startBuffering();
+      r.arm('A - B', 'S', 'audio/mpeg');
+      r.addAudio(List.filled(300, 9));
+      // Fire both without awaiting — they must serialize, not corrupt segments.
+      final f1 = r.onTrackChanged();
+      final f2 = r.onStreamStopped();
+      final p1 = await f1;
+      final p2 = await f2;
+      // Exactly one produced the recording (the first); the other is a clean
+      // no-op (nothing armed by then) — never partial/duplicate output.
+      final paths = [p1, p2].whereType<String>().toList();
+      expect(paths, hasLength(1));
+      expect(File(paths.single).readAsBytesSync(), hasLength(300));
+      expect(r.bufferedBytes, 0); // torn down last
+    });
+
+    test('rapid startBuffering / onStreamStopped sequences cleanly', () async {
+      final a = r.startBuffering();
+      final b = r.onStreamStopped();
+      final c = r.startBuffering();
+      await Future.wait([a, b, c]);
+      // Last op was startBuffering ⇒ a fresh, writable buffer, nothing buffered.
+      expect(r.bufferedBytes, 0);
+      r.addAudio(List.filled(10, 1));
+      expect(r.bufferedBytes, 10);
+    });
   });
 
   group('uniqueFilePath', () {
@@ -146,7 +177,8 @@ void main() {
     });
 
     test('avoids overwriting existing files by suffixing (n)', () async {
-      File('${dir.path}${Platform.pathSeparator}Song.mp3').writeAsStringSync('x');
+      File('${dir.path}${Platform.pathSeparator}Song.mp3')
+          .writeAsStringSync('x');
       final p2 = await StreamRecorder.uniqueFilePath(dir, 'Song', 'mp3');
       expect(p2, '${dir.path}${Platform.pathSeparator}Song (2).mp3');
 

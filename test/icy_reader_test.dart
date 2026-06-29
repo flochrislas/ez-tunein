@@ -32,7 +32,10 @@ void main() {
       final titles = <String>[];
       final p = IcyParser(metaInt: 4, onTitle: titles.add);
       p.addChunk([
-        1, 2, 3, 4,
+        1,
+        2,
+        3,
+        4,
         ...metaBlock("StreamTitle='Solo Title';"),
       ]);
       expect(titles, ['Solo Title']);
@@ -42,7 +45,10 @@ void main() {
       final titles = <String>[];
       final p = IcyParser(metaInt: 4, onTitle: titles.add);
       final stream = [
-        1, 2, 3, 4,
+        1,
+        2,
+        3,
+        4,
         ...metaBlock("StreamTitle='Across Chunks';StreamUrl='';"),
       ];
       // Feed it one byte at a time — the state machine must reassemble it.
@@ -55,7 +61,8 @@ void main() {
     test('handles audio split exactly at the metaint boundary', () {
       final titles = <String>[];
       final audio = <int>[];
-      final p = IcyParser(metaInt: 4, onTitle: titles.add, onAudio: audio.addAll);
+      final p =
+          IcyParser(metaInt: 4, onTitle: titles.add, onAudio: audio.addAll);
       // First chunk is exactly the audio run; the metadata block follows.
       p.addChunk([10, 20, 30, 40]);
       p.addChunk(metaBlock("StreamTitle='Boundary';"));
@@ -66,7 +73,8 @@ void main() {
     test('zero-length metadata blocks emit no title and resume audio', () {
       final titles = <String>[];
       final audio = <int>[];
-      final p = IcyParser(metaInt: 4, onTitle: titles.add, onAudio: audio.addAll);
+      final p =
+          IcyParser(metaInt: 4, onTitle: titles.add, onAudio: audio.addAll);
       p.addChunk([
         1, 2, 3, 4,
         0, // empty metadata block (length byte 0)
@@ -81,7 +89,10 @@ void main() {
       final titles = <String>[];
       final p = IcyParser(metaInt: 4, onTitle: titles.add);
       p.addChunk([
-        1, 2, 3, 4,
+        1,
+        2,
+        3,
+        4,
         ...metaBlock("StreamTitle='';StreamUrl='';"),
       ]);
       expect(titles, isEmpty);
@@ -91,9 +102,11 @@ void main() {
       final titles = <String>[];
       final p = IcyParser(metaInt: 2, onTitle: titles.add);
       p.addChunk([
-        1, 2,
+        1,
+        2,
         ...metaBlock("StreamTitle='First';"),
-        3, 4,
+        3,
+        4,
         ...metaBlock("StreamTitle='Second';"),
       ]);
       expect(titles, ['First', 'Second']);

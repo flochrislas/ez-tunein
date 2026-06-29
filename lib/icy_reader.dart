@@ -131,6 +131,11 @@ class IcyReader {
   // Bounded, conservative reconnect: don't hammer the station.
   static const _maxAttempts = 5;
 
+  /// Backoff before reconnect attempt [attempt] (0-based). Overridable for tests
+  /// (so they don't wait real seconds); defaults to exponential, capped at 30 s.
+  Duration Function(int attempt) reconnectDelay =
+      (attempt) => Duration(seconds: (1 << attempt).clamp(1, 30));
+
   Future<void> start(
     String url, {
     required void Function(String title) onTitle,
@@ -226,10 +231,13 @@ class IcyReader {
       _onStatus?.call(MetadataStatus.failed);
       return;
     }
-    // Exponential backoff: 1, 2, 4, 8, 16 s (capped at 30).
-    final delaySec = (1 << _attempts).clamp(1, 30);
+    // Report the gap right away (not just when the retry fires) so the UI marks
+    // the title stale and disables Save/Record for the whole backoff window —
+    // otherwise status would linger on `active` until _connect() runs.
+    _onStatus?.call(MetadataStatus.connecting);
+    final delay = reconnectDelay(_attempts);
     _attempts++;
-    _reconnectTimer = Timer(Duration(seconds: delaySec), () => _connect(gen));
+    _reconnectTimer = Timer(delay, () => _connect(gen));
   }
 
   Future<void> stop() async {

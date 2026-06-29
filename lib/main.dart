@@ -327,6 +327,10 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   // State of the ICY metadata side-channel; drives the now-playing message when
   // there's no title yet (connecting / unsupported / failed / waiting).
   MetadataStatus _metaStatus = MetadataStatus.idle;
+  // Whether the displayed title reflects a *live* metadata feed (status active).
+  // Gates Save/Record so a stale title (feed dropped after a first title) can't
+  // be saved/recorded; the title itself may still be shown (as "last: …").
+  bool _trackInfoFresh = false;
   // Monotonic play-session id: bumped on every _play so late async work from a
   // superseded station (a fast switch) can't update the UI / history / recording.
   int _playSession = 0;
@@ -339,7 +343,8 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   // so track-change handling dedups against _lastRecTitle (mirrors history).
   final _recorder = StreamRecorder();
   bool _recording = false;
-  bool _recBuffering = true; // mirrors _recBufferingKey; gates the Record button
+  bool _recBuffering =
+      true; // mirrors _recBufferingKey; gates the Record button
   String _lastRecTitle = '';
 
   // Type-to-search filter over station names. On desktop, typing a printable
@@ -388,8 +393,8 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     // Recording config (defaults: buffering on, 35 MB, Downloads folder). Clamp
     // to _recBufferMbMax so an old saved value above the new cap is still bounded.
     final buffering = prefs.getBool(_recBufferingKey) ?? true;
-    final bufMb =
-        (prefs.getInt(_recBufferMbKey) ?? _recBufferMbDefault).clamp(5, _recBufferMbMax);
+    final bufMb = (prefs.getInt(_recBufferMbKey) ?? _recBufferMbDefault)
+        .clamp(5, _recBufferMbMax);
     _recorder.bufferingEnabled = buffering;
     _recorder.bufferCapBytes = bufMb * 1024 * 1024;
 
@@ -422,8 +427,8 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     final prefs = _prefs;
     if (prefs == null) return;
     final buffering = prefs.getBool(_recBufferingKey) ?? true;
-    final bufMb =
-        (prefs.getInt(_recBufferMbKey) ?? _recBufferMbDefault).clamp(5, _recBufferMbMax);
+    final bufMb = (prefs.getInt(_recBufferMbKey) ?? _recBufferMbDefault)
+        .clamp(5, _recBufferMbMax);
     final was = _recBuffering;
     _recorder.bufferingEnabled = buffering;
     _recorder.bufferCapBytes = bufMb * 1024 * 1024;
@@ -659,12 +664,17 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
       _current = station;
       _loading = true;
       _nowPlaying = '';
+      _trackInfoFresh = false;
       _metaStatus = MetadataStatus.connecting;
       _lastHistoryTitle =
           ''; // new session: let the first song log even if same
       _lastRecTitle = ''; // reset the recorder's track-change dedup
       _recording = false;
     });
+    // Drop the previous station's metadata connection up front — it's irrelevant
+    // once the user switched, and this ensures even a *failed* retune (setUrl
+    // throws below) doesn't leave the old reader reconnecting in the background.
+    await _icy.stop();
     // Switching station ends any in-progress recording (spec: a station change
     // stops recording) — finalize it before we retune.
     final saved = await _recorder.onStreamStopped();
@@ -687,6 +697,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
         _current = null;
         _loading = false;
         _nowPlaying = '';
+        _trackInfoFresh = false;
         _metaStatus = MetadataStatus.idle;
         _lastHistoryTitle = '';
         _lastRecTitle = '';
@@ -710,6 +721,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
         setState(() {
           _nowPlaying = title;
           _metaStatus = MetadataStatus.active;
+          _trackInfoFresh = true; // live title ⇒ Save/Record are meaningful
         });
         _recordHistory(title);
         _handleTrackChange(title);
@@ -717,7 +729,13 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
       onAudio: _recorder.addAudio,
       onStatus: (status) {
         if (session != _playSession || !mounted) return;
-        setState(() => _metaStatus = status);
+        setState(() {
+          _metaStatus = status;
+          // Only an active feed is "fresh". A drop/exhausted-reconnect (failed),
+          // an unsupported station, or a reconnecting gap (connecting) means the
+          // shown title is stale — don't let it be saved/recorded.
+          _trackInfoFresh = status == MetadataStatus.active;
+        });
       },
     );
     // Raise (or refresh) the playback foreground service for this station.
@@ -738,6 +756,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     setState(() {
       _current = null;
       _nowPlaying = '';
+      _trackInfoFresh = false;
       _metaStatus = MetadataStatus.idle;
       _lastHistoryTitle = '';
       _lastRecTitle = '';
@@ -787,7 +806,8 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     }
     _recorder.arm(_nowPlaying, _current!.name, _icy.contentType);
     setState(() => _recording = true);
-    unawaited(_syncPlaybackService()); // reflect "recording" in the notification
+    unawaited(
+        _syncPlaybackService()); // reflect "recording" in the notification
     _snack('Recording… it saves automatically when the track changes.');
   }
 
@@ -840,8 +860,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     if (data == 'stop') unawaited(_stop());
   }
 
-  String _baseName(String path) =>
-      path.split(Platform.pathSeparator).last;
+  String _baseName(String path) => path.split(Platform.pathSeparator).last;
 
   /// Message shown in the now-playing box when there's no title yet — distinct
   /// per metadata state so the user can tell "still connecting" from "this
@@ -859,6 +878,23 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
       case MetadataStatus.active:
         return 'Waiting for track info…';
     }
+  }
+
+  /// The now-playing line. Shows a live title when the feed is fresh; keeps a
+  /// stale title visible across a brief reconnect; and, once reconnects are
+  /// exhausted, flags it as stale rather than passing it off as current.
+  String _nowPlayingText(bool playing) {
+    if (_loading) return 'Connecting…';
+    if (!playing) return '—';
+    if (_trackInfoFresh && _nowPlaying.isNotEmpty) return _nowPlaying;
+    if (_nowPlaying.isNotEmpty && _metaStatus == MetadataStatus.failed) {
+      return 'Track info unavailable — last: $_nowPlaying';
+    }
+    // Reconnecting gap: keep the (stale) title rather than flicker the message.
+    if (_nowPlaying.isNotEmpty && _metaStatus == MetadataStatus.connecting) {
+      return _nowPlaying;
+    }
+    return _metaStatusMessage();
   }
 
   /// Append a song to the play history the first time we see its title for the
@@ -1037,8 +1073,8 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
             onPressed: () async {
               await Navigator.of(context).push(
                 MaterialPageRoute<void>(
-                  builder: (_) =>
-                      _RecordingSettingsPage(streamBitrateKbps: _icy.bitrateKbps),
+                  builder: (_) => _RecordingSettingsPage(
+                      streamBitrateKbps: _icy.bitrateKbps),
                 ),
               );
               await _applyRecordingPrefs(); // pick up any changes
@@ -1086,9 +1122,8 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
                   decoration: BoxDecoration(
                     borderRadius: BorderRadius.circular(12),
                     border: Border.all(
-                      color: _recording
-                          ? Colors.red.shade500
-                          : Colors.transparent,
+                      color:
+                          _recording ? Colors.red.shade500 : Colors.transparent,
                       width: 1.5,
                     ),
                     boxShadow: _recording
@@ -1118,11 +1153,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
                           ),
                           const SizedBox(height: 8),
                           Text(
-                            _loading
-                                ? 'Connecting…'
-                                : (_nowPlaying.isNotEmpty
-                                    ? _nowPlaying
-                                    : (playing ? _metaStatusMessage() : '—')),
+                            _nowPlayingText(playing),
                             style: Theme.of(context).textTheme.headlineSmall,
                             textAlign: TextAlign.center,
                           ),
@@ -1142,10 +1173,10 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
                           label: const Text('Stop'),
                         ),
                       ),
-                    // "Save title" needs a current track, like Record.
-                    if (playing && _nowPlaying.isNotEmpty)
-                      const SizedBox(width: 12),
-                    if (playing && _nowPlaying.isNotEmpty)
+                    // "Save title" needs a *fresh* live title (not a stale one
+                    // left over after the metadata feed dropped).
+                    if (playing && _trackInfoFresh) const SizedBox(width: 12),
+                    if (playing && _trackInfoFresh)
                       Expanded(
                         child: FilledButton.icon(
                           onPressed: _saveCurrentTrack,
@@ -1155,9 +1186,12 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
                       ),
                   ],
                 ),
-                // Record appears only while buffering is on and a track is known
-                // (you can't record without a buffer to draw the song-start from).
-                if (playing && _recBuffering && _nowPlaying.isNotEmpty) ...[
+                // Record needs buffering on and a fresh live title (you can't
+                // start recording off a stale feed). Stays visible while already
+                // recording so you can still cancel even if metadata then drops.
+                if (playing &&
+                    _recBuffering &&
+                    (_recording || _trackInfoFresh)) ...[
                   const SizedBox(height: 12),
                   SizedBox(
                     width: double.infinity,
@@ -1396,8 +1430,8 @@ class _RecordingSettingsPageState extends State<_RecordingSettingsPage> {
     setState(() {
       _prefs = prefs;
       _buffering = prefs.getBool(_recBufferingKey) ?? true;
-      _bufferMb =
-          (prefs.getInt(_recBufferMbKey) ?? _recBufferMbDefault).clamp(5, _recBufferMbMax);
+      _bufferMb = (prefs.getInt(_recBufferMbKey) ?? _recBufferMbDefault)
+          .clamp(5, _recBufferMbMax);
       _dir = prefs.getString(recDirKey);
     });
   }
@@ -1482,86 +1516,86 @@ class _RecordingSettingsPageState extends State<_RecordingSettingsPage> {
 
   Widget _buildSettings(Color muted, bool hasDir) {
     return ListView(
-        padding: const EdgeInsets.all(8),
-        children: [
-          SwitchListTile(
-            title: const Text('Buffer the stream'),
-            subtitle: const Text(
-                'Required to record. When off, the Record button is hidden.'),
-            value: _buffering,
-            onChanged: _setBuffering,
+      padding: const EdgeInsets.all(8),
+      children: [
+        SwitchListTile(
+          title: const Text('Buffer the stream'),
+          subtitle: const Text(
+              'Required to record. When off, the Record button is hidden.'),
+          value: _buffering,
+          onChanged: _setBuffering,
+        ),
+        const Divider(),
+        ListTile(
+          title: const Text('Buffer size'),
+          subtitle: Text(
+            '$_bufferMb MB — how far back into a song you can reach when you '
+            'hit Record.',
+            style: TextStyle(color: _buffering ? null : muted),
           ),
-          const Divider(),
-          ListTile(
-            title: const Text('Buffer size'),
-            subtitle: Text(
-              '$_bufferMb MB — how far back into a song you can reach when you '
-              'hit Record.',
-              style: TextStyle(color: _buffering ? null : muted),
-            ),
+        ),
+        Slider(
+          value: _bufferMb.clamp(5, _recBufferMbMax).toDouble(),
+          min: 5,
+          max: _recBufferMbMax.toDouble(),
+          divisions: _recBufferMbMax - 5, // 1 MB steps
+          label: '$_bufferMb MB',
+          onChanged:
+              _buffering ? (v) => setState(() => _bufferMb = v.round()) : null,
+          onChangeEnd: _buffering ? (v) => _setBufferMb(v.round()) : null,
+        ),
+        _bufferGuide(muted),
+        const Divider(),
+        ListTile(
+          title: const Text('Save recordings to'),
+          subtitle: Text(
+            hasDir
+                ? _dir!
+                : (isDesktop
+                    ? 'Downloads folder (default)'
+                    : 'App folder — share recordings from the file manager'),
           ),
-          Slider(
-            value: _bufferMb.clamp(5, _recBufferMbMax).toDouble(),
-            min: 5,
-            max: _recBufferMbMax.toDouble(),
-            divisions: _recBufferMbMax - 5, // 1 MB steps
-            label: '$_bufferMb MB',
-            onChanged:
-                _buffering ? (v) => setState(() => _bufferMb = v.round()) : null,
-            onChangeEnd: _buffering ? (v) => _setBufferMb(v.round()) : null,
-          ),
-          _bufferGuide(muted),
-          const Divider(),
-          ListTile(
-            title: const Text('Save recordings to'),
-            subtitle: Text(
-              hasDir
-                  ? _dir!
-                  : (isDesktop
-                      ? 'Downloads folder (default)'
-                      : 'App folder — share recordings from the file manager'),
-            ),
-            trailing: isDesktop
-                ? Wrap(
-                    spacing: 4,
-                    children: [
-                      if (hasDir)
-                        TextButton(
-                          onPressed: _resetDir,
-                          child: const Text('Reset'),
-                        ),
-                      FilledButton.tonal(
-                        onPressed: _pickDir,
-                        child: const Text('Change…'),
+          trailing: isDesktop
+              ? Wrap(
+                  spacing: 4,
+                  children: [
+                    if (hasDir)
+                      TextButton(
+                        onPressed: _resetDir,
+                        child: const Text('Reset'),
                       ),
-                    ],
-                  )
-                : null,
-          ),
-          if (!isDesktop)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-              child: Text(
-                'On Android, recordings save to the app folder; picking an '
-                'arbitrary folder isn\'t supported yet.',
-                style: TextStyle(color: muted, fontStyle: FontStyle.italic),
-              ),
-            ),
-          const Divider(),
+                    FilledButton.tonal(
+                      onPressed: _pickDir,
+                      child: const Text('Change…'),
+                    ),
+                  ],
+                )
+              : null,
+        ),
+        if (!isDesktop)
           Padding(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
             child: Text(
-              widget.streamBitrateKbps != null
-                  ? 'Recordings keep the stream\'s own bitrate '
-                      '(${widget.streamBitrateKbps} kbps) — no re-encoding, so '
-                      'they\'re lossless and saved instantly.'
-                  : 'Recordings keep the stream\'s own bitrate — no re-encoding, '
-                      'so they\'re lossless and saved instantly.',
-              style: TextStyle(color: muted),
+              'On Android, recordings save to the app folder; picking an '
+              'arbitrary folder isn\'t supported yet.',
+              style: TextStyle(color: muted, fontStyle: FontStyle.italic),
             ),
           ),
-        ],
-      );
+        const Divider(),
+        Padding(
+          padding: const EdgeInsets.all(16),
+          child: Text(
+            widget.streamBitrateKbps != null
+                ? 'Recordings keep the stream\'s own bitrate '
+                    '(${widget.streamBitrateKbps} kbps) — no re-encoding, so '
+                    'they\'re lossless and saved instantly.'
+                : 'Recordings keep the stream\'s own bitrate — no re-encoding, '
+                    'so they\'re lossless and saved instantly.',
+            style: TextStyle(color: muted),
+          ),
+        ),
+      ],
+    );
   }
 }
 
@@ -1591,7 +1625,8 @@ class _RecordingsPageState extends State<_RecordingsPage> {
   double _volume = 1.0; // 0.0–1.0; shares the radio's `volume` pref
   bool _isPlaying = false;
   Duration? _duration; // length of the current file (from durationStream)
-  double? _seekDragMs; // slider position while the user is dragging the seek bar
+  double?
+      _seekDragMs; // slider position while the user is dragging the seek bar
   ProcessingState? _lastState; // to act on the transition *into* completed only
   bool _neverStops = false;
   bool _randomize = false;
@@ -1777,7 +1812,8 @@ class _RecordingsPageState extends State<_RecordingsPage> {
         return;
       }
       final buttons = [
-        NotificationButton(id: 'rec_toggle', text: _isPlaying ? 'Pause' : 'Play'),
+        NotificationButton(
+            id: 'rec_toggle', text: _isPlaying ? 'Pause' : 'Play'),
         const NotificationButton(id: 'rec_skip', text: 'Skip'),
         const NotificationButton(id: 'rec_stop', text: 'Stop'),
       ];
@@ -2100,8 +2136,7 @@ class _RecordingsPageState extends State<_RecordingsPage> {
                         ),
                       ),
                       IconButton(
-                        icon:
-                            Icon(_isPlaying ? Icons.pause : Icons.play_arrow),
+                        icon: Icon(_isPlaying ? Icons.pause : Icons.play_arrow),
                         tooltip: _isPlaying ? 'Pause' : 'Play',
                         onPressed: _togglePlayPause,
                       ),
@@ -2718,7 +2753,8 @@ class _TrackListPageState extends State<_TrackListPage> {
     }
     // Build only a window of rows so a long history stays cheap to render; the
     // window grows on scroll / "Show more" (see _onScroll / _showMore).
-    final shown = _visibleCount < visible.length ? _visibleCount : visible.length;
+    final shown =
+        _visibleCount < visible.length ? _visibleCount : visible.length;
     final windowed =
         shown == visible.length ? visible : visible.sublist(0, shown);
     final hasMore = shown < visible.length;

@@ -93,15 +93,26 @@ Lifecycle hardening (added after a code review):
   connection — and any pending reconnect timer — is inert.
 - **Status, not one message.** `MetadataStatus`
   (idle/connecting/waitingForFirstTitle/unsupported/failed/active) is reported via
-  `onStatus`. The now-playing box distinguishes "still connecting", "this station
-  sends no `icy-metaint`" → *"doesn't provide track info"*, and a failed/dead
-  connection → *"unavailable"* — instead of a blanket *"Waiting for track info…"*.
-  A non-empty title always takes precedence, so a brief reconnect never blanks it.
+  `onStatus`. The now-playing box (`_nowPlayingText`) distinguishes "still
+  connecting", "this station sends no `icy-metaint`" → *"doesn't provide track
+  info"*, and a failed/dead connection → *"unavailable"* — instead of a blanket
+  *"Waiting for track info…"*. A title is kept visible across a brief reconnect;
+  once reconnects are exhausted it's shown as *"Track info unavailable — last: …"*.
+- **Freshness gates Save/Record.** `_trackInfoFresh` is true only while the feed
+  is `active`. **Save** and **Record** key off it (not merely a non-empty title),
+  so a title left stale after the feed dies can't be saved or recorded; the
+  Record button stays visible while `_recording` so an in-progress capture can
+  still be cancelled.
 - **Auto-reconnect.** If the metadata socket drops (`onDone`/`onError`) while the
   station is still current, it reconnects with bounded exponential backoff
-  (~5 tries, capped at 30 s; a fresh title refills the budget). This is what fixes
-  the screen-off case where the next-track signal — and thus a recording's
-  finalize — would otherwise never arrive.
+  (~5 tries, capped at 30 s; a fresh title refills the budget). On a drop it
+  reports `connecting` **immediately** (not only when the retry fires), so the
+  freshness gate above engages for the whole backoff gap rather than lingering on
+  `active`. This is what fixes the screen-off case where the next-track signal —
+  and thus a recording's finalize — would otherwise never arrive.
+- **Clean retune.** `_play` calls `await _icy.stop()` before `setUrl`, so the old
+  station's reader is gone up front — even a failed retune can't leave it
+  reconnecting in the background.
 
 > Note: stream "listen" links are often `.pls`/`.m3u` playlists, not the audio
 > itself. `just_audio` and `IcyReader` both need the **direct** stream URL. For
@@ -329,6 +340,14 @@ current track, so "record" just commits the buffer and keeps going.
   (`_play` finalizes the old one first). Finalize concatenates the live segments
   in order, streamed in 1 MB chunks (bounded memory); a one-segment song takes a
   rename fast path. A success snackbar names the saved file.
+- **Serialized lifecycle.** `startBuffering`/`onTrackChanged`/`onStreamStopped`/
+  `dispose` run through a `_runExclusive` queue, so a metadata-driven finalize
+  (track change) can't interleave with `_stop`'s finalize and double-move or
+  delete the same segments — overlapping calls run one-after-another, and the
+  second sees `_armed == false` and becomes a clean no-op. Public methods call
+  private bodies (`_startBuffering`, …) so the queue doesn't deadlock on itself.
+  `addAudio` is synchronous and unqueued; it no-ops while there's no open active
+  segment (i.e. mid-teardown).
 - **Track-change detection.** Driven by the same `IcyReader.onTitle` as history,
   via `_handleTrackChange`, which dedups on `_lastRecTitle` (the reader re-emits
   each tick) and **skips the first title of a session** — that's the initial song,
@@ -477,13 +496,20 @@ With a sizeable default list, the station list has a live name filter:
   state machine (metadata split across chunks, audio split exactly at the
   `metaint` boundary, zero-length blocks, `StreamTitle` with/without `StreamUrl`,
   no empty titles), the CSV read/write round-trip, the recorder's filename
-  sanitisation / extension / unique-path helpers, and the track-text helpers. Run
-  with `~/flutter/bin/flutter test`. The UI is not widget-tested (it needs audio /
-  a display this environment lacks).
-- **CI** (`.github/workflows/ci.yml`) runs `flutter analyze` + `flutter test` +
-  a debug Linux build on every push/PR. The **release** workflow gates on the same
-  `verify` job (analyze + test) before it builds any platform artifacts, so a
-  broken commit can't be tagged into a published release.
+  sanitisation / extension / unique-path helpers, the segmented ring buffer
+  (rolling, dropping, ordered finalize, cancel, and serialized overlapping ops —
+  the recorder's segment dir/size are injectable so this runs without a device),
+  and the track-text helpers. `IcyReader`'s connection lifecycle is covered by an
+  integration test (`test/icy_reader_lifecycle_test.dart`) driving a loopback
+  `HttpServer`: unsupported (no `icy-metaint`), first-title → `active`, a dropped
+  feed → `connecting` *immediately*, and exhausted-reconnects → `failed`
+  (the backoff is injectable via `reconnectDelay` so it runs in milliseconds). Run with `~/flutter/bin/flutter test`. The UI is not
+  widget-tested (it needs audio / a display this environment lacks).
+- **CI** (`.github/workflows/ci.yml`) runs `dart format --set-exit-if-changed` +
+  `flutter analyze` + `flutter test` + a debug Linux build on every push/PR. The
+  **release** workflow gates on the same `verify` job (format + analyze + test)
+  before it builds any platform artifacts, so a broken or unformatted commit can't
+  be tagged into a published release. Run `dart format lib test` before pushing.
 
 ## Known limitations / possible next steps
 

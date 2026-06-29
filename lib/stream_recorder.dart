@@ -70,8 +70,24 @@ class StreamRecorder {
     return (bufferCapBytes ~/ 8).clamp(mb, 16 * mb);
   }
 
+  // Serializes the async lifecycle operations (start/finalize/teardown) so two
+  // of them can't interleave across awaits and corrupt the shared segment state
+  // — e.g. a metadata-driven onTrackChanged finalizing while _stop's
+  // onStreamStopped is also finalizing the same segments. Each public op runs to
+  // completion before the next starts. (addAudio is synchronous and not queued;
+  // it no-ops whenever there's no open active segment — i.e. during teardown.)
+  Future<void> _op = Future.value();
+
+  Future<T> _runExclusive<T>(Future<T> Function() body) {
+    final next = _op.then((_) => body());
+    _op = next.then<void>((_) {}, onError: (_) {});
+    return next;
+  }
+
   /// Begin (or restart) buffering for a fresh track. No-op when buffering is off.
-  Future<void> startBuffering() async {
+  Future<void> startBuffering() => _runExclusive(_startBuffering);
+
+  Future<void> _startBuffering() async {
     if (!bufferingEnabled) return;
     _armed = false;
     await _closeAndDeleteAll();
@@ -149,23 +165,21 @@ class StreamRecorder {
 
   /// Finalize an armed recording (if any) and start a clean buffer for the next
   /// track. Returns the saved file path, or null if nothing was recording.
-  Future<String?> onTrackChanged() async {
-    final path = await _finalizeIfArmed();
-    await startBuffering();
-    return path;
-  }
+  Future<String?> onTrackChanged() => _runExclusive(() async {
+        final path = await _finalizeIfArmed();
+        await _startBuffering();
+        return path;
+      });
 
   /// Finalize an armed recording (if any) and tear the buffer down (stream ended
   /// or the station was switched).
-  Future<String?> onStreamStopped() async {
-    final path = await _finalizeIfArmed();
-    await _closeAndDeleteAll();
-    return path;
-  }
+  Future<String?> onStreamStopped() => _runExclusive(() async {
+        final path = await _finalizeIfArmed();
+        await _closeAndDeleteAll();
+        return path;
+      });
 
-  Future<void> dispose() async {
-    await _closeAndDeleteAll();
-  }
+  Future<void> dispose() => _runExclusive(_closeAndDeleteAll);
 
   Future<String?> _finalizeIfArmed() async {
     if (!_armed) return null;
@@ -262,9 +276,8 @@ class StreamRecorder {
 
   String _fileNameBase() {
     final parts = splitArtistTitle(_title);
-    final raw = parts.artist.isEmpty
-        ? parts.title
-        : '${parts.artist} - ${parts.title}';
+    final raw =
+        parts.artist.isEmpty ? parts.title : '${parts.artist} - ${parts.title}';
     final cleaned = sanitizeFileName(raw);
     if (cleaned.isNotEmpty) return cleaned;
     return sanitizeFileName(_station.isEmpty ? 'recording' : _station);
