@@ -44,15 +44,18 @@ Runs on **Windows**, **Linux**, and **Android**.
   share sheet (email it to yourself, send it to your PC, save to Drive…); on
   desktop the file's already in your Documents folder and the button reveals it.
 - **Manage your stations** — add a station with the **+** button, or hover a
-  station to reveal **edit** (rename / change the URL) and **delete** icons. Your
-  list is remembered between launches.
+  station to reveal **edit** (rename, change the URL, or give it a **colour**) and
+  **delete** icons. Colour a station to tag it by genre or flag a favourite — its
+  name and icon show in that colour. Your list is remembered between launches.
 - **Import / export your stations** — back up or share your station list as a
   simple `name,url` CSV, and import one back in (new stations are merged in;
   duplicates are skipped). Both live at the bottom of the station list.
 - **Find a station fast** — just start typing to filter the list by name, or tap
   the **search** icon in the top bar. Press **Esc** (or the **✕**) to clear.
-- **Remembers your setup** — volume and (on desktop) the window size persist
-  across restarts.
+- **Make it yours** — pick an **accent color** in **Settings** (preset swatches
+  or exact R/G/B); it re-themes the app instantly.
+- **Remembers your setup** — volume, accent color, and (on desktop) the window
+  size persist across restarts.
 
 Your saved tracks are written to `radio_saved_tracks.csv` and the play history to
 `radio_history.csv` (same columns) — on desktop both live in your **Documents**

@@ -33,8 +33,8 @@ A minimalist internet-radio player:
   keep the app un-frozen while recording with the screen off (not for the capture
   itself). See [Recording](#recording).
 - **Persistence:** `shared_preferences` (volume, station list, window size,
-  history-logging flag, recording settings) and two plain CSV files (saved tracks
-  + play history).
+  accent color, history-logging flag, recording settings) and two plain CSV files
+  (saved tracks + play history).
 - **Window sizing:** `window_manager` (desktop only).
 - **Export:** `share_plus` (OS share sheet for the saved-tracks CSV on mobile).
   Pinned to `^12`: `^13` requires `win32 ^6`, which conflicts with
@@ -148,12 +148,14 @@ Key symbols:
 | `_actionTile` | The dimmed/italic list rows for add / import / export at the end of the station list. |
 | `_searchBar` / `_openSearch` / `_closeSearch` / `_onPageKey` | The type-to-search station filter (see [Filtering](#filtering--type-to-search)). |
 | `_importStations` / `_exportStations` | Import/export the station list as a `name,url` CSV via `file_picker`. |
-| `_StationDialog` | Minimal name + URL dialog; returns a `Station`. Pre-fills from `initial` to edit (vs. add). |
+| `_StationDialog` | Name + URL + colour-picker dialog; returns a `Station`. Pre-fills from `initial` to edit (vs. add). |
+| `_ColorSwatch` | Reusable round colour chip (accent picker + station colour picker). |
 | `_TrackListPage` / `SavedTrack` | The shared sortable/searchable table screen, used for **both** saved tracks and play history (parameterized by `title` / `fileResolver` / `emptyMessage` / `shareSubject` / `isHistory`). `_export` shares the CSV (share sheet on mobile, reveal-in-folder on desktop); `_historyControls` adds the count + logging toggle when `isHistory`. |
 | `IcyParser` | Pure byte-level ICY state machine (no I/O); unit-tested. |
 | `IcyReader` | HTTP + lifecycle wrapper around `IcyParser`: forwards audio bytes via `onAudio`, reports `contentType`/`bitrateKbps` and `MetadataStatus`, and auto-reconnects a dropped metadata socket. |
 | `StreamRecorder` | Buffers the live audio to a temp file and finalizes a recording to `Artist - Title.<ext>` (see [Recording](#recording)). |
-| `_RecordingSettingsPage` | The recording-settings screen (buffering toggle, buffer size, output folder); writes the `rec_*` prefs. |
+| `_SettingsPage` | The combined Settings screen: appearance (accent color) + recording prefs (buffering, buffer size, lead-in, output folder). |
+| `accentColor` | Top-level `ValueNotifier<Color>` for the Material 3 seed; `RadioApp` rebuilds `MaterialApp` on change so the accent applies live. |
 | `_RecordingsPage` | The recordings library — lists/plays the files in the output folder with never-stops / randomize / skip / export (see [Recordings library](#recordings-library)). |
 | `recordingsDir()` / `listRecordings()` / `isAudioFile` | Locate the recordings folder (shared by the recorder + library) and list its audio files. |
 | `savedTracksFile()` / `historyFile()` | Resolve the two CSV paths (`radio_saved_tracks.csv` / `radio_history.csv`). |
@@ -167,9 +169,11 @@ Key symbols:
   - `volume` (double, 0.0–1.0)
   - `stations` (JSON string — array of `{name, url}`)
   - `win_w`, `win_h` (doubles)
+  - `accent_color` (int ARGB, default teal `0xFF009688` — the Material 3 seed)
   - `history_logging` (bool, default `true` — whether the player logs to history)
   - `rec_buffering` (bool, default `true` — buffer the stream; off ⇒ no Record button)
-  - `rec_buffer_mb` (int, default `50` — buffer cap / how far back a song can be reached)
+  - `rec_buffer_mb` (int, default `35`, capped `128` — buffer cap / rewind window)
+  - `rec_lead_seconds` (int, default `60`; -1 = whole buffer — manual-recording lead-in cap)
   - `rec_dir` (string, optional — recording output folder; absent ⇒ Downloads)
   - `rec_never_stops` (bool, default `false` — recordings library auto-advances)
   - `rec_randomize` (bool, default `false` — recordings library shuffles)
@@ -209,6 +213,11 @@ Key symbols:
   at the new object so the highlight/label stay in sync (the audio keeps running
   on the old connection until the user re-taps). Removing the currently-playing
   station stops playback first.
+- **Per-station colour:** `Station.color` (optional ARGB int) is set in the
+  edit/add dialog via a "Default" chip + preset swatches, saved in the `stations`
+  JSON, and used by `_StationTile` to tint the icon + name — for tagging stations
+  by genre or flagging favourites. It's not part of the `name,url` CSV (a local
+  visual tag only).
 - **Play history:** see [Play history](#play-history).
 - **Filtering (type-to-search):** see [Filtering](#filtering--type-to-search).
 - **Volume:** applied to the player *before* first playback on restore, so the
@@ -421,11 +430,19 @@ current track, so "record" just commits the buffer and keeps going.
     stations that announce the next title early, or the player's buffer lag, can
     still make a cut feel a few seconds early; that's inherent to ICY metadata
     without decoding the audio.
-- **Settings (`_RecordingSettingsPage`).** A gear icon in the app bar opens it; it
-  writes the three `rec_*` prefs directly (same single-cached-instance trick as the
-  history toggle). On pop the player calls `_applyRecordingPrefs`, which pushes the
-  new cap/enabled state into the recorder and starts/stops live buffering if the
-  toggle flipped. The buffer-size slider carries a `_bufferGuide` caption — the MB
+- **Settings (`_SettingsPage`).** One combined screen (gear icon on both the
+  player and the recordings view), with **Appearance** first, then recording.
+  - **Accent color.** The Material 3 seed lives in a top-level
+    `ValueNotifier<Color> accentColor`; `RadioApp` wraps `MaterialApp` in a
+    `ValueListenableBuilder` on it, so a pick re-themes the whole app live (the
+    sliders/switches/buttons — including the picker's own sliders — recolor as you
+    drag). The page offers preset swatches plus R/G/B sliders for any color, using
+    the current color API (`Color.fromARGB` / `.toARGB32()` / `.r`·`.g`·`.b`);
+    `main()` restores the saved `accent_color` before the first frame.
+  - **Recording.** Writes the `rec_*` prefs directly (same single-cached-instance
+    trick as the history toggle). On pop the player calls `_applyRecordingPrefs`,
+    which pushes the new cap/enabled/lead-in state into the recorder and
+    starts/stops live buffering if the toggle flipped. The buffer-size slider carries a `_bufferGuide` caption — the MB
   cost of one minute of MP3 at 128/256/320 kbps, and how many minutes the chosen
   size rewinds at each — so the number isn't an opaque "MB". Output folder
   defaults to `getDownloadsDirectory()` on desktop

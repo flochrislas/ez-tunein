@@ -22,6 +22,12 @@ import 'track_utils.dart';
 
 const _winWidthKey = 'win_w';
 const _winHeightKey = 'win_h';
+// Accent color (the Material 3 seed): drives sliders, switches, and filled
+// buttons app-wide. Stored as an ARGB int; the notifier lets a change in the
+// Settings view re-theme the whole app live. Default is teal (0xFF009688).
+const _accentColorKey = 'accent_color';
+const _defaultAccentValue = 0xFF009688;
+final accentColor = ValueNotifier<Color>(const Color(_defaultAccentValue));
 // Whether the player logs played songs to the history CSV. Toggled from the
 // History view, read by the player; defaults to on. Top-level so both screens
 // share it (shared_preferences returns one cached instance, so a write here is
@@ -93,10 +99,14 @@ void main() async {
     );
   }
 
+  // Restore the saved accent color before the first frame.
+  final prefs = await SharedPreferences.getInstance();
+  accentColor.value =
+      Color(prefs.getInt(_accentColorKey) ?? _defaultAccentValue);
+
   // On desktop, restore the saved window size before showing the window.
   if (isDesktop) {
     await windowManager.ensureInitialized();
-    final prefs = await SharedPreferences.getInstance();
     final w = prefs.getDouble(_winWidthKey);
     final h = prefs.getDouble(_winHeightKey);
     await windowManager.waitUntilReadyToShow(
@@ -145,15 +155,90 @@ class _PlaybackServiceHandler extends TaskHandler {
   void onNotificationPressed() => FlutterForegroundTask.launchApp();
 }
 
-/// A radio station: a display name and an Icecast/Shoutcast stream URL.
+/// A radio station: a display name, an Icecast/Shoutcast stream URL, and an
+/// optional user-chosen colour (ARGB int) for its list entry — null ⇒ the
+/// default theme colour. Lets the user tag stations by genre / favourite.
 class Station {
-  const Station(this.name, this.url);
+  const Station(this.name, this.url, {this.color});
   final String name;
   final String url;
+  final int? color;
 
-  Map<String, String> toJson() => {'name': name, 'url': url};
-  factory Station.fromJson(Map<String, dynamic> j) =>
-      Station(j['name'] as String, j['url'] as String);
+  Map<String, dynamic> toJson() =>
+      {'name': name, 'url': url, if (color != null) 'color': color};
+  factory Station.fromJson(Map<String, dynamic> j) => Station(
+        j['name'] as String,
+        j['url'] as String,
+        color: (j['color'] as num?)?.toInt(),
+      );
+}
+
+// Quick-pick colour swatches, shared by the accent picker and the per-station
+// colour picker (the accent picker's RGB sliders cover everything else). Ordered
+// around the hue wheel (warm → green → cyan/blue → violet → pink) then neutrals;
+// where a hue would repeat, a lighter/darker variant keeps neighbours distinct.
+const _colorPresets = <Color>[
+  Color(0xFFF44336), // red
+  Color(0xFFFF7043), // coral
+  Color(0xFFFF9800), // orange
+  Color(0xFFFFC107), // amber
+  Color(0xFFFFEB3B), // yellow
+  Color(0xFFCDDC39), // lime
+  Color(0xFF8BC34A), // light green
+  Color(0xFF43A047), // green
+  Color(0xFF1B5E20), // dark green
+  Color(0xFF009688), // teal (the default accent)
+  Color(0xFF00BCD4), // cyan
+  Color(0xFF29B6F6), // light blue
+  Color(0xFF1E88E5), // blue
+  Color(0xFF0D47A1), // navy
+  Color(0xFF5C6BC0), // indigo
+  Color(0xFF7E57C2), // deep purple
+  Color(0xFF9C27B0), // purple
+  Color(0xFFE91E63), // pink
+  Color(0xFF880E4F), // dark rose
+  Color(0xFF795548), // brown
+  Color(0xFF607D8B), // blue grey
+  Color(0xFF9E9E9E), // grey
+  Color(0xFFFFFFFF), // white
+];
+
+/// A round, tappable colour chip (with a check + ring when selected). Shared by
+/// the accent picker and the per-station colour picker.
+class _ColorSwatch extends StatelessWidget {
+  const _ColorSwatch({
+    required this.color,
+    required this.selected,
+    required this.onTap,
+    this.size = 34,
+  });
+  final Color color;
+  final bool selected;
+  final VoidCallback onTap;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      customBorder: const CircleBorder(),
+      child: Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          color: color,
+          shape: BoxShape.circle,
+          border: Border.all(
+            color: selected ? Colors.white : Colors.white24,
+            width: selected ? 3 : 1,
+          ),
+        ),
+        child: selected
+            ? Icon(Icons.check, size: size * 0.5, color: Colors.white)
+            : null,
+      ),
+    );
+  }
 }
 
 // The list users start with on first launch; afterwards it's whatever they've
@@ -298,15 +383,19 @@ class RadioApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'EZ-TuneIn Radio',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorSchemeSeed: Colors.teal,
-        useMaterial3: true,
-        brightness: Brightness.dark,
+    // Rebuilds whenever the user picks a new accent color in Settings.
+    return ValueListenableBuilder<Color>(
+      valueListenable: accentColor,
+      builder: (context, color, _) => MaterialApp(
+        title: 'EZ-TuneIn Radio',
+        debugShowCheckedModeBanner: false,
+        theme: ThemeData(
+          colorSchemeSeed: color,
+          useMaterial3: true,
+          brightness: Brightness.dark,
+        ),
+        home: const PlayerPage(),
       ),
-      home: const PlayerPage(),
     );
   }
 }
@@ -1198,11 +1287,11 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
           ),
           IconButton(
             icon: const Icon(Icons.settings),
-            tooltip: 'Recording settings',
+            tooltip: 'Settings',
             onPressed: () async {
               await Navigator.of(context).push(
                 MaterialPageRoute<void>(
-                  builder: (_) => const _RecordingSettingsPage(),
+                  builder: (_) => const _SettingsPage(),
                 ),
               );
               await _applyRecordingPrefs(); // pick up any changes
@@ -1443,15 +1532,21 @@ class _StationTileState extends State<_StationTile> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    // Optional per-station colour tags the icon + name (genre / favourite).
+    final stationColor =
+        widget.station.color != null ? Color(widget.station.color!) : null;
     return MouseRegion(
       onEnter: (_) => setState(() => _hovered = true),
       onExit: (_) => setState(() => _hovered = false),
       child: ListTile(
         leading: Icon(
           widget.isCurrent ? Icons.graphic_eq : Icons.radio,
-          color: widget.isCurrent ? scheme.primary : null,
+          color: stationColor ?? (widget.isCurrent ? scheme.primary : null),
         ),
-        title: Text(widget.station.name),
+        title: Text(
+          widget.station.name,
+          style: stationColor != null ? TextStyle(color: stationColor) : null,
+        ),
         selected: widget.isCurrent,
         onTap: widget.onTap,
         trailing: _hovered
@@ -1490,6 +1585,9 @@ class _StationDialog extends StatefulWidget {
 class _StationDialogState extends State<_StationDialog> {
   late final _name = TextEditingController(text: widget.initial?.name ?? '');
   late final _url = TextEditingController(text: widget.initial?.url ?? '');
+  late Color? _color = widget.initial?.color != null
+      ? Color(widget.initial!.color!)
+      : null; // null ⇒ default theme colour
 
   @override
   void dispose() {
@@ -1502,33 +1600,83 @@ class _StationDialogState extends State<_StationDialog> {
     final name = _name.text.trim();
     final url = _url.text.trim();
     if (name.isEmpty || url.isEmpty) return;
-    Navigator.of(context).pop(Station(name, url));
+    Navigator.of(context).pop(Station(name, url, color: _color?.toARGB32()));
+  }
+
+  /// The "no custom colour" choice — an outlined chip, selected when [_color] is
+  /// null, so the station shows in the normal theme colour.
+  Widget _defaultChoice() {
+    final scheme = Theme.of(context).colorScheme;
+    final selected = _color == null;
+    return Tooltip(
+      message: 'Default colour',
+      child: InkWell(
+        onTap: () => setState(() => _color = null),
+        customBorder: const CircleBorder(),
+        child: Container(
+          width: 30,
+          height: 30,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            border: Border.all(
+              color: selected ? Colors.white : Colors.white24,
+              width: selected ? 3 : 1,
+            ),
+          ),
+          child: Icon(Icons.format_color_reset,
+              size: 16, color: scheme.onSurfaceVariant),
+        ),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     final editing = widget.initial != null;
+    final muted = Theme.of(context).colorScheme.onSurfaceVariant;
     return AlertDialog(
       title: Text(editing ? 'Edit station' : 'Add station'),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          TextField(
-            controller: _name,
-            autofocus: true,
-            decoration: const InputDecoration(labelText: 'Name'),
-            textInputAction: TextInputAction.next,
-          ),
-          TextField(
-            controller: _url,
-            decoration: const InputDecoration(
-              labelText: 'Stream URL',
-              hintText: 'https://…',
+      content: SizedBox(
+        width: 320,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              controller: _name,
+              autofocus: true,
+              decoration: const InputDecoration(labelText: 'Name'),
+              textInputAction: TextInputAction.next,
             ),
-            keyboardType: TextInputType.url,
-            onSubmitted: (_) => _submit(),
-          ),
-        ],
+            TextField(
+              controller: _url,
+              decoration: const InputDecoration(
+                labelText: 'Stream URL',
+                hintText: 'https://…',
+              ),
+              keyboardType: TextInputType.url,
+              onSubmitted: (_) => _submit(),
+            ),
+            const SizedBox(height: 20),
+            Text('Colour (tag by genre, favourite…)',
+                style: TextStyle(color: muted, fontSize: 13)),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                _defaultChoice(),
+                for (final c in _colorPresets)
+                  _ColorSwatch(
+                    color: c,
+                    selected: _color?.toARGB32() == c.toARGB32(),
+                    onTap: () => setState(() => _color = c),
+                    size: 30,
+                  ),
+              ],
+            ),
+          ],
+        ),
       ),
       actions: [
         TextButton(
@@ -1547,19 +1695,20 @@ class _StationDialogState extends State<_StationDialog> {
 /// Settings for the song recorder: buffering on/off, buffer size, and where
 /// recordings are saved. Persists straight to shared_preferences (the player
 /// re-reads them via _applyRecordingPrefs when this page is popped).
-class _RecordingSettingsPage extends StatefulWidget {
-  const _RecordingSettingsPage();
+class _SettingsPage extends StatefulWidget {
+  const _SettingsPage();
 
   @override
-  State<_RecordingSettingsPage> createState() => _RecordingSettingsPageState();
+  State<_SettingsPage> createState() => _SettingsPageState();
 }
 
-class _RecordingSettingsPageState extends State<_RecordingSettingsPage> {
+class _SettingsPageState extends State<_SettingsPage> {
   SharedPreferences? _prefs;
   bool _buffering = true;
   int _bufferMb = _recBufferMbDefault;
   int _leadSeconds = _recLeadSecondsDefault; // -1 ⇒ whole buffer
   String? _dir; // null/empty ⇒ Downloads (desktop) / app folder (mobile)
+  Color _accent = const Color(_defaultAccentValue);
 
   @override
   void initState() {
@@ -1577,8 +1726,23 @@ class _RecordingSettingsPageState extends State<_RecordingSettingsPage> {
           .clamp(5, _recBufferMbMax);
       _leadSeconds = prefs.getInt(_recLeadSecondsKey) ?? _recLeadSecondsDefault;
       _dir = prefs.getString(recDirKey);
+      _accent = accentColor.value;
     });
   }
+
+  // Re-theme the whole app live as the user drags, without hammering prefs.
+  void _previewAccent(Color c) {
+    setState(() => _accent = c);
+    accentColor.value = c;
+  }
+
+  // Persist the choice (on release / swatch tap).
+  Future<void> _commitAccent(Color c) async {
+    _previewAccent(c);
+    await _prefs?.setInt(_accentColorKey, c.toARGB32());
+  }
+
+  int _chan(double v) => (v * 255).round(); // Color component (0..1) → 0..255
 
   Future<void> _setBuffering(bool v) async {
     setState(() => _buffering = v);
@@ -1662,7 +1826,7 @@ class _RecordingSettingsPageState extends State<_RecordingSettingsPage> {
     final muted = Theme.of(context).colorScheme.onSurfaceVariant;
     final hasDir = _dir != null && _dir!.trim().isNotEmpty;
     return Scaffold(
-      appBar: AppBar(title: const Text('Recording settings')),
+      appBar: AppBar(title: const Text('Settings')),
       // Wait for prefs before building the controls — otherwise the slider paints
       // at the default and then visibly animates to the saved value on open.
       body: _prefs == null
@@ -1671,10 +1835,60 @@ class _RecordingSettingsPageState extends State<_RecordingSettingsPage> {
     );
   }
 
+  /// One tappable accent swatch (selected one shows a check + ring).
+  Widget _swatch(Color c) => _ColorSwatch(
+        color: c,
+        selected: c.toARGB32() == _accent.toARGB32(),
+        onTap: () => _commitAccent(c),
+      );
+
+  /// One R/G/B channel slider tinted with the live accent. [build] maps a new
+  /// channel value (0..255) to the resulting color.
+  Widget _channelSlider(String label, int value, Color Function(int) build) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 16, right: 4),
+      child: Row(
+        children: [
+          SizedBox(width: 14, child: Text(label)),
+          Expanded(
+            child: Slider(
+              value: value.toDouble(),
+              max: 255,
+              onChanged: (v) => _previewAccent(build(v.round())),
+              onChangeEnd: (v) => _commitAccent(build(v.round())),
+            ),
+          ),
+          SizedBox(
+            width: 30,
+            child: Text('$value', textAlign: TextAlign.end),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildSettings(Color muted, bool hasDir) {
+    final r = _chan(_accent.r), g = _chan(_accent.g), b = _chan(_accent.b);
     return ListView(
       padding: const EdgeInsets.all(8),
       children: [
+        const ListTile(
+          title: Text('Accent color'),
+          subtitle: Text('Tints the sliders, switches, and buttons.'),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+          child: Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: [for (final c in _colorPresets) _swatch(c)],
+          ),
+        ),
+        // Fine control: any color. Channel builders rebuild from the other two.
+        _channelSlider('R', r, (v) => Color.fromARGB(255, v, g, b)),
+        _channelSlider('G', g, (v) => Color.fromARGB(255, r, v, b)),
+        _channelSlider('B', b, (v) => Color.fromARGB(255, r, g, v)),
+        const Divider(),
         SwitchListTile(
           title: const Text('Buffer the stream'),
           subtitle: const Text(
@@ -2248,11 +2462,11 @@ class _RecordingsPageState extends State<_RecordingsPage> {
           ),
           IconButton(
             icon: const Icon(Icons.settings),
-            tooltip: 'Recording settings',
+            tooltip: 'Settings',
             onPressed: () async {
               await Navigator.of(context).push(
                 MaterialPageRoute<void>(
-                  builder: (_) => const _RecordingSettingsPage(),
+                  builder: (_) => const _SettingsPage(),
                 ),
               );
               // The output folder may have changed — re-list, but only while
@@ -2865,7 +3079,7 @@ class _TrackListPageState extends State<_TrackListPage> {
     return Theme(
       // Force the dark scheme for this screen regardless of system setting.
       data: ThemeData(
-        colorSchemeSeed: Colors.teal,
+        colorSchemeSeed: accentColor.value,
         useMaterial3: true,
         brightness: Brightness.dark,
       ),
