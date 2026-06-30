@@ -112,6 +112,44 @@ void main() {
       expect(parts, 1); // just the new active segment
     });
 
+    test('lead-in cap keeps only the most recent pre-arm bytes', () async {
+      await r.startBuffering();
+      feed(r, 600, tag: 1); // pre-arm audio (within the 1000-byte cap)
+      // Keep only the last 100 bytes of lead-in, then record 200 more.
+      r.arm('A - B', 'S', 'audio/mpeg', leadInBytes: 100);
+      feed(r, 200, tag: 2);
+      final path = await r.onStreamStopped();
+
+      expect(path, isNotNull);
+      final bytes = File(path!).readAsBytesSync();
+      expect(bytes.length, 300); // 100 lead-in + 200 post-arm (not all 800)
+      expect(bytes.sublist(0, 100), everyElement(1)); // tail of the lead-in
+      expect(bytes.sublist(100), everyElement(2)); // everything after arm
+    });
+
+    test('lead-in cap of zero records only from the tap', () async {
+      await r.startBuffering();
+      feed(r, 500, tag: 1); // pre-arm audio — should be excluded entirely
+      r.arm('A - B', 'S', 'audio/mpeg', leadInBytes: 0);
+      feed(r, 200, tag: 2);
+      final path = await r.onStreamStopped();
+      final bytes = File(path!).readAsBytesSync();
+      expect(bytes, hasLength(200));
+      expect(bytes, everyElement(2));
+    });
+
+    test('null lead-in keeps the whole buffered song', () async {
+      await r.startBuffering();
+      feed(r, 300, tag: 5); // pre-arm (within cap ⇒ retained)
+      r.arm('A - B', 'S', 'audio/mpeg'); // leadInBytes: null ⇒ whole buffer
+      feed(r, 200, tag: 6);
+      final path = await r.onStreamStopped();
+      final bytes = File(path!).readAsBytesSync();
+      expect(bytes, hasLength(500));
+      expect(bytes.sublist(0, 300), everyElement(5));
+      expect(bytes.sublist(300), everyElement(6));
+    });
+
     test('single-segment recording takes the rename fast path', () async {
       await r.startBuffering();
       r.arm('A - B', 'S', 'audio/mpeg');

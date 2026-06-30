@@ -59,6 +59,55 @@ void main() {
     expect(statuses.last, MetadataStatus.idle);
   });
 
+  test('no metadata + bufferWithoutMetadata forwards the raw audio', () async {
+    server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    server.listen((req) async {
+      req.response.headers.set('content-type', 'audio/mpeg');
+      req.response.add([1, 2, 3, 4, 5]);
+      await req.response.close(); // bytes are delivered before the stream ends
+    });
+
+    final audio = <int>[];
+    final statuses = <MetadataStatus>[];
+    // Long backoff so the post-close reconnect doesn't churn during the test.
+    final reader = IcyReader()
+      ..reconnectDelay = (_) => const Duration(seconds: 60);
+    await reader.start(urlFor(server),
+        onTitle: (_) {},
+        onAudio: audio.addAll,
+        onStatus: statuses.add,
+        bufferWithoutMetadata: true);
+
+    await pumpUntil(() => audio.length >= 5, reason: 'raw audio');
+    expect(audio, [1, 2, 3, 4, 5]);
+    expect(statuses, contains(MetadataStatus.unsupported)); // still no titles
+
+    await reader.stop();
+  });
+
+  test('no metadata without the flag downloads nothing', () async {
+    server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    server.listen((req) async {
+      req.response.headers.set('content-type', 'audio/mpeg');
+      req.response.add([1, 2, 3, 4, 5]);
+      await req.response.close();
+    });
+
+    final audio = <int>[];
+    final statuses = <MetadataStatus>[];
+    final reader = IcyReader();
+    await reader.start(urlFor(server),
+        onTitle: (_) {}, onAudio: audio.addAll, onStatus: statuses.add);
+
+    await pumpUntil(() => statuses.contains(MetadataStatus.unsupported),
+        reason: 'unsupported');
+    // The connection is dropped after headers; no audio is ever forwarded.
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    expect(audio, isEmpty);
+
+    await reader.stop();
+  });
+
   test('first title ⇒ active; a dropped feed reports connecting immediately',
       () async {
     server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);

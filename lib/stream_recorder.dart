@@ -4,11 +4,13 @@ import 'package:path_provider/path_provider.dart';
 
 import 'track_utils.dart';
 
-/// One on-disk buffer segment: a file plus how many bytes have been written to
-/// it. The live track's audio is spread across a sequence of these.
+/// One on-disk buffer segment: a file, how many bytes it holds, and the logical
+/// offset of its first byte within the session's monotonic byte stream (used to
+/// honour a lead-in cap at finalize). The live track's audio spans a sequence.
 class _Segment {
-  _Segment(this.file);
+  _Segment(this.file, this.startOffset);
   final File file;
+  final int startOffset;
   int bytes = 0;
 }
 
@@ -49,6 +51,12 @@ class StreamRecorder {
   RandomAccessFile? _raf; // append handle to _segments.last
   int _segSeq = 0; // names segment files uniquely within a session
   int _totalBytes = 0; // sum across all current segments
+  // Monotonic count of bytes written since startBuffering (NOT decremented when
+  // old segments drop) — the coordinate space for segment offsets / lead-in.
+  int _writtenBytes = 0;
+  // Logical offset from which an armed recording should be saved (a lead-in cap
+  // moves it forward; the default is the oldest retained byte = whole buffer).
+  int _recordStartOffset = 0;
   bool _swept = false; // cleaned crash-leftover segment files once?
   bool _armed = false;
   String _title = '';
@@ -98,6 +106,8 @@ class StreamRecorder {
     }
     _segSeq = 0;
     _totalBytes = 0;
+    _writtenBytes = 0;
+    _recordStartOffset = 0;
     _openNewSegment();
   }
 
@@ -112,6 +122,7 @@ class StreamRecorder {
       raf.writeFromSync(bytes);
       _segments.last.bytes += bytes.length;
       _totalBytes += bytes.length;
+      _writtenBytes += bytes.length;
       if (_segments.last.bytes >= _segmentSizeBytes) _rollSegment();
       // While not armed, drop the oldest whole segment(s) once the rest still
       // covers the rewind window. While armed we keep everything.
@@ -126,7 +137,7 @@ class StreamRecorder {
     _segSeq++;
     // FileMode.write truncates any stale file and allows reading (for finalize).
     _raf = f.openSync(mode: FileMode.write);
-    _segments.add(_Segment(f));
+    _segments.add(_Segment(f, _writtenBytes));
   }
 
   void _rollSegment() {
@@ -151,12 +162,23 @@ class StreamRecorder {
 
   /// Mark the current track to be recorded. The buffer already holds the song so
   /// far; from now on bytes are kept regardless of the cap.
-  void arm(String title, String station, String? contentType) {
+  ///
+  /// [leadInBytes] caps how much of the already-buffered audio (from *before*
+  /// this call) is included: only the most recent [leadInBytes] are kept. Null
+  /// means "the whole buffer" (used for titled recordings, where the buffer was
+  /// reset at the song's start anyway). The cap can't reach past what's still
+  /// retained in the ring buffer.
+  void arm(String title, String station, String? contentType,
+      {int? leadInBytes}) {
     if (!bufferingEnabled || _raf == null) return;
     _armed = true;
     _title = title;
     _station = station;
     _ext = extForContentType(contentType);
+    final earliest = _segments.isEmpty ? 0 : _segments.first.startOffset;
+    _recordStartOffset = leadInBytes == null
+        ? earliest
+        : (_writtenBytes - leadInBytes).clamp(earliest, _writtenBytes);
   }
 
   /// Discard an in-progress recording but keep buffering the same track (so the
@@ -190,8 +212,11 @@ class StreamRecorder {
       final dir = await outputDirResolver!();
       if (!await dir.exists()) await dir.create(recursive: true);
       final outPath = await uniqueFilePath(dir, _fileNameBase(), _ext);
-      if (_segments.length == 1) {
-        // Fast path (short song = one segment): move it, no copy.
+      // Does a lead-in cap mean we must drop the front of the oldest segment?
+      final needsFrontSkip = _segments.isNotEmpty &&
+          _recordStartOffset > _segments.first.startOffset;
+      if (_segments.length == 1 && !needsFrontSkip) {
+        // Fast path (short song = one segment, nothing to trim): move it.
         final src = _segments.first.file;
         try {
           await src.rename(outPath);
@@ -200,13 +225,19 @@ class StreamRecorder {
           _deleteFileQuietly(src);
         }
       } else {
-        // Concatenate segments in order, streamed in chunks (bounded memory).
+        // Concatenate segments in order, streamed in chunks (bounded memory),
+        // skipping any bytes before _recordStartOffset (the lead-in cap).
         final out = File(outPath).openSync(mode: FileMode.write);
         try {
           for (final seg in _segments) {
             if (!seg.file.existsSync()) continue;
+            if (seg.startOffset + seg.bytes <= _recordStartOffset) {
+              continue; // entirely before the cut
+            }
+            final skip = _recordStartOffset - seg.startOffset;
             final src = seg.file.openSync(mode: FileMode.read);
             try {
+              if (skip > 0) src.setPositionSync(skip);
               const chunk = 1024 * 1024;
               while (true) {
                 final data = src.readSync(chunk);

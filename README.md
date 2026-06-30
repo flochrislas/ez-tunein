@@ -22,6 +22,8 @@ Runs on **Windows**, **Linux**, and **Android**.
   quietly buffers the stream as you listen). Recording finishes on its own when the
   track changes. Lossless and instant — the station's audio is saved as-is, no
   re-encoding. Tune the buffer size and save location in **Recording settings**.
+  For stations that don't broadcast track names, **Record** still works — it just
+  records until you tap again to save (named after the station and time).
 - **Recordings library** — the **library** icon opens a list of your recorded songs;
   tap one to play it (with a seek bar to scrub). Flip **Never stops** to roll into
   the next song automatically, **Randomize** to shuffle, use **skip** to jump ahead,

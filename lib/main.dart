@@ -42,6 +42,12 @@ const _recBufferMbDefault = 35;
 // Cap the buffer so the synchronous trim (reads ~cap bytes into RAM) can't cause
 // a large memory spike / UI hitch. See doc/implementation-notes.md.
 const _recBufferMbMax = 128;
+// Lead-in cap (seconds) for *manual* recordings on title-less stations: how much
+// already-buffered audio to keep before the Record tap. -1 ⇒ the whole buffer.
+const _recLeadSecondsKey = 'rec_lead_seconds';
+const _recLeadSecondsDefault = 60;
+// The slider stops (seconds; -1 = whole buffer), in order.
+const _recLeadOptions = [0, 30, 60, 120, 180, 240, -1];
 // Recordings-library playback toggles (the _RecordingsPage view).
 const _recNeverStopsKey = 'rec_never_stops'; // auto-play the next file at end
 const _recRandomizeKey = 'rec_randomize'; // pick the next file at random
@@ -343,8 +349,12 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   // so track-change handling dedups against _lastRecTitle (mirrors history).
   final _recorder = StreamRecorder();
   bool _recording = false;
+  // True when the in-progress recording is user-bounded (a title-less station,
+  // so there's no track change to auto-save on — the user taps again to save).
+  bool _manualRecording = false;
   bool _recBuffering =
       true; // mirrors _recBufferingKey; gates the Record button
+  int _recLeadSeconds = _recLeadSecondsDefault; // mirrors _recLeadSecondsKey
   String _lastRecTitle = '';
 
   // Type-to-search filter over station names. On desktop, typing a printable
@@ -397,6 +407,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
         .clamp(5, _recBufferMbMax);
     _recorder.bufferingEnabled = buffering;
     _recorder.bufferCapBytes = bufMb * 1024 * 1024;
+    final leadSec = prefs.getInt(_recLeadSecondsKey) ?? _recLeadSecondsDefault;
 
     List<Station>? loadedStations;
     final savedStations = prefs.getString(_stationsKey);
@@ -415,6 +426,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
       if (savedVolume != null) _volume = savedVolume;
       if (loadedStations != null) _stations = loadedStations;
       _recBuffering = buffering;
+      _recLeadSeconds = leadSec;
     });
   }
 
@@ -432,14 +444,30 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     final was = _recBuffering;
     _recorder.bufferingEnabled = buffering;
     _recorder.bufferCapBytes = bufMb * 1024 * 1024;
-    if (mounted) setState(() => _recBuffering = buffering);
+    final leadSec = prefs.getInt(_recLeadSecondsKey) ?? _recLeadSecondsDefault;
+    if (mounted) {
+      setState(() {
+        _recBuffering = buffering;
+        _recLeadSeconds = leadSec;
+      });
+    }
     if (_current != null && buffering != was) {
       if (buffering) {
         await _recorder.startBuffering();
       } else {
         await _recorder.onStreamStopped();
-        if (mounted) setState(() => _recording = false);
+        if (mounted) {
+          setState(() {
+            _recording = false;
+            _manualRecording = false;
+          });
+        }
         unawaited(_syncPlaybackService()); // clear "recording" from the notif
+      }
+      // A title-less station only streams its (second) audio connection when
+      // buffering is on, so restart the reader to match the new flag.
+      if (_metaStatus == MetadataStatus.unsupported) {
+        _startIcy(_current!, ++_playSession);
       }
     }
   }
@@ -670,6 +698,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
           ''; // new session: let the first song log even if same
       _lastRecTitle = ''; // reset the recorder's track-change dedup
       _recording = false;
+      _manualRecording = false;
     });
     // Drop the previous station's metadata connection up front — it's irrelevant
     // once the user switched, and this ensures even a *failed* retune (setUrl
@@ -702,6 +731,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
         _lastHistoryTitle = '';
         _lastRecTitle = '';
         _recording = false;
+        _manualRecording = false;
       });
       _snack('Could not play ${station.name}: $e');
       unawaited(_syncPlaybackService()); // _current == null ⇒ tears it down
@@ -714,8 +744,19 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     // are session-guarded so a stale connection can't write into current state.
     await _recorder.startBuffering();
     if (session != _playSession) return;
+    _startIcy(station, session);
+    // Raise (or refresh) the playback foreground service for this station.
+    unawaited(_syncPlaybackService());
+  }
+
+  /// Open the metadata/audio reader for [station], tagging its callbacks with
+  /// [session] so a superseded connection can't write into current state. Passes
+  /// the buffering flag so title-less stations only keep their (second) audio
+  /// connection open when there's a buffer to feed.
+  void _startIcy(Station station, int session) {
     _icy.start(
       station.url,
+      bufferWithoutMetadata: _recBuffering,
       onTitle: (title) {
         if (session != _playSession || !mounted) return;
         setState(() {
@@ -738,8 +779,6 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
         });
       },
     );
-    // Raise (or refresh) the playback foreground service for this station.
-    unawaited(_syncPlaybackService());
   }
 
   Future<void> _setVolume(double value) async {
@@ -761,6 +800,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
       _lastHistoryTitle = '';
       _lastRecTitle = '';
       _recording = false;
+      _manualRecording = false;
     });
     // _current is now null, so this tears the service down.
     unawaited(_syncPlaybackService());
@@ -782,33 +822,98 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     }
     final saved = await _recorder.onTrackChanged();
     if (saved != null && mounted) {
-      setState(() => _recording = false);
+      setState(() {
+        _recording = false;
+        _manualRecording = false;
+      });
       _snack('Saved recording: ${_baseName(saved)}');
     } else if (saved != null) {
       _recording = false;
+      _manualRecording = false;
     }
     // Refresh the notification text for the new track / cleared recording state.
     unawaited(_syncPlaybackService());
   }
 
-  /// Arm recording for the current song, or cancel an in-progress one.
+  /// Whether recording can be *started* now: buffering on, a station playing,
+  /// and either a fresh live title (auto mode) or a title-less station we're
+  /// streaming raw (manual mode).
+  bool get _canRecord =>
+      _recBuffering &&
+      _current != null &&
+      (_trackInfoFresh || _metaStatus == MetadataStatus.unsupported);
+
+  /// Arm recording, or finish/cancel an in-progress one.
   void _toggleRecord() {
     if (_recording) {
-      _recorder.cancel();
-      setState(() => _recording = false);
-      unawaited(_syncPlaybackService()); // notification back to plain "playing"
-      _snack('Recording cancelled.');
+      if (_manualRecording) {
+        // No upcoming track change to auto-save on — this tap is the save.
+        unawaited(_saveManualRecording());
+      } else {
+        _recorder.cancel();
+        setState(() => _recording = false);
+        unawaited(_syncPlaybackService()); // notification back to "playing"
+        _snack('Recording cancelled.');
+      }
       return;
     }
-    if (_current == null || _nowPlaying.isEmpty) {
+    if (_current == null) {
+      _snack('Start a station first.');
+      return;
+    }
+    // Title-less station ⇒ user-bounded ("manual") recording, named after the
+    // station + a timestamp since there's no Artist - Title.
+    final manual = !_trackInfoFresh;
+    if (!manual && _nowPlaying.isEmpty) {
       _snack('Wait for the track info before recording.');
       return;
     }
-    _recorder.arm(_nowPlaying, _current!.name, _icy.contentType);
-    setState(() => _recording = true);
+    final recName = manual ? '${_current!.name} ${_recStamp()}' : _nowPlaying;
+    // Cap the lead-in for manual recordings (title-less stations have no song
+    // boundary, so the buffer could otherwise prepend many minutes of unrelated
+    // audio). Titled recordings pass null: the buffer already starts at the song.
+    int? leadInBytes;
+    if (manual && _recLeadSeconds >= 0) {
+      final kbps = _icy.bitrateKbps ?? 128; // fall back if the server omits it
+      leadInBytes =
+          kbps * 125 * _recLeadSeconds; // kbps*1000/8 bytes per second
+    }
+    _recorder.arm(recName, _current!.name, _icy.contentType,
+        leadInBytes: leadInBytes);
+    setState(() {
+      _recording = true;
+      _manualRecording = manual;
+    });
     unawaited(
         _syncPlaybackService()); // reflect "recording" in the notification
-    _snack('Recording… it saves automatically when the track changes.');
+    _snack(manual
+        ? 'Recording… tap again to save.'
+        : 'Recording… it saves automatically when the track changes.');
+  }
+
+  /// Finalize a manual (title-less) recording and start a fresh buffer.
+  Future<void> _saveManualRecording() async {
+    final saved = await _recorder.onTrackChanged(); // finalize + fresh buffer
+    if (mounted) {
+      setState(() {
+        _recording = false;
+        _manualRecording = false;
+      });
+    }
+    unawaited(_syncPlaybackService());
+    if (saved != null) {
+      _snack('Saved recording: ${_baseName(saved)}');
+    } else {
+      _snack('Nothing recorded yet.');
+    }
+  }
+
+  /// A filename-safe `YYYY-MM-DD HH.MM` stamp for naming title-less recordings.
+  String _recStamp() {
+    final n = DateTime.now();
+    String two(int x) => x.toString().padLeft(2, '0');
+    return '${n.year}-${two(n.month)}-${two(n.day)} '
+        '${two(n.hour)}.${two(n.minute)}';
   }
 
   /// Keep the Android playback foreground service in sync with the current
@@ -895,6 +1000,30 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
       return _nowPlaying;
     }
     return _metaStatusMessage();
+  }
+
+  /// A friendly codec label from the stream's `Content-Type`, or null if it's
+  /// missing/unrecognised (better to show nothing than a cryptic MIME string).
+  String? _streamFormatLabel(String? contentType) {
+    final c = (contentType ?? '').toLowerCase();
+    if (c.isEmpty) return null;
+    if (c.contains('aac')) return 'AAC';
+    if (c.contains('opus')) return 'Opus';
+    if (c.contains('ogg') || c.contains('vorbis')) return 'OGG';
+    if (c.contains('flac')) return 'FLAC';
+    if (c.contains('wav')) return 'WAV';
+    if (c.contains('mpeg') || c.contains('mp3')) return 'MP3';
+    return null;
+  }
+
+  /// Small "format · bitrate" line under the title, from the ICY response
+  /// headers (either may be absent). Null when neither is known.
+  String? _streamInfoLine() {
+    final fmt = _streamFormatLabel(_icy.contentType);
+    final br = _icy.bitrateKbps;
+    if (fmt == null && br == null) return null;
+    if (fmt != null && br != null) return '$fmt · $br kbps';
+    return fmt ?? '$br kbps';
   }
 
   /// Append a song to the play history the first time we see its title for the
@@ -1073,8 +1202,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
             onPressed: () async {
               await Navigator.of(context).push(
                 MaterialPageRoute<void>(
-                  builder: (_) => _RecordingSettingsPage(
-                      streamBitrateKbps: _icy.bitrateKbps),
+                  builder: (_) => const _RecordingSettingsPage(),
                 ),
               );
               await _applyRecordingPrefs(); // pick up any changes
@@ -1157,6 +1285,21 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
                             style: Theme.of(context).textTheme.headlineSmall,
                             textAlign: TextAlign.center,
                           ),
+                          if (playing && _streamInfoLine() != null) ...[
+                            const SizedBox(height: 6),
+                            Text(
+                              _streamInfoLine()!,
+                              textAlign: TextAlign.center,
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .bodySmall
+                                  ?.copyWith(
+                                    color: Theme.of(context)
+                                        .colorScheme
+                                        .onSurfaceVariant,
+                                  ),
+                            ),
+                          ],
                         ],
                       ),
                     ),
@@ -1186,12 +1329,11 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
                       ),
                   ],
                 ),
-                // Record needs buffering on and a fresh live title (you can't
-                // start recording off a stale feed). Stays visible while already
-                // recording so you can still cancel even if metadata then drops.
-                if (playing &&
-                    _recBuffering &&
-                    (_recording || _trackInfoFresh)) ...[
+                // Record needs buffering on and either a fresh title (auto mode,
+                // saves on the next track change) or a title-less station we're
+                // streaming raw (manual mode, tap again to save). Stays visible
+                // while recording so you can finish/cancel even if the feed drops.
+                if (playing && (_recording || _canRecord)) ...[
                   const SizedBox(height: 12),
                   SizedBox(
                     width: double.infinity,
@@ -1203,13 +1345,17 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
                               foregroundColor: Colors.white,
                             ),
                             icon: const Icon(Icons.stop_circle),
-                            label: const Text('Recording… tap to cancel'),
+                            label: Text(_manualRecording
+                                ? 'Recording… tap to save'
+                                : 'Recording… tap to cancel'),
                           )
                         : FilledButton.tonalIcon(
                             onPressed: _toggleRecord,
                             icon: Icon(Icons.fiber_manual_record,
                                 color: Colors.red.shade400),
-                            label: const Text('Record this song'),
+                            label: Text(_trackInfoFresh
+                                ? 'Record this song'
+                                : 'Record'),
                           ),
                   ),
                 ],
@@ -1402,11 +1548,7 @@ class _StationDialogState extends State<_StationDialog> {
 /// recordings are saved. Persists straight to shared_preferences (the player
 /// re-reads them via _applyRecordingPrefs when this page is popped).
 class _RecordingSettingsPage extends StatefulWidget {
-  const _RecordingSettingsPage({this.streamBitrateKbps});
-
-  /// Bitrate of the currently playing stream, if any — shown read-only because
-  /// recordings keep the stream's own rate (no re-encoding).
-  final int? streamBitrateKbps;
+  const _RecordingSettingsPage();
 
   @override
   State<_RecordingSettingsPage> createState() => _RecordingSettingsPageState();
@@ -1416,6 +1558,7 @@ class _RecordingSettingsPageState extends State<_RecordingSettingsPage> {
   SharedPreferences? _prefs;
   bool _buffering = true;
   int _bufferMb = _recBufferMbDefault;
+  int _leadSeconds = _recLeadSecondsDefault; // -1 ⇒ whole buffer
   String? _dir; // null/empty ⇒ Downloads (desktop) / app folder (mobile)
 
   @override
@@ -1432,6 +1575,7 @@ class _RecordingSettingsPageState extends State<_RecordingSettingsPage> {
       _buffering = prefs.getBool(_recBufferingKey) ?? true;
       _bufferMb = (prefs.getInt(_recBufferMbKey) ?? _recBufferMbDefault)
           .clamp(5, _recBufferMbMax);
+      _leadSeconds = prefs.getInt(_recLeadSecondsKey) ?? _recLeadSecondsDefault;
       _dir = prefs.getString(recDirKey);
     });
   }
@@ -1444,6 +1588,19 @@ class _RecordingSettingsPageState extends State<_RecordingSettingsPage> {
   Future<void> _setBufferMb(int mb) async {
     setState(() => _bufferMb = mb);
     await _prefs?.setInt(_recBufferMbKey, mb);
+  }
+
+  Future<void> _setLeadSeconds(int sec) async {
+    setState(() => _leadSeconds = sec);
+    await _prefs?.setInt(_recLeadSecondsKey, sec);
+  }
+
+  /// Human label for a lead-in value (seconds; -1 = whole buffer).
+  static String _leadLabel(int sec) {
+    if (sec < 0) return 'Max (whole buffer)';
+    if (sec == 0) return 'None';
+    if (sec < 60) return '${sec}s';
+    return '${sec ~/ 60} min';
   }
 
   Future<void> _pickDir() async {
@@ -1547,6 +1704,33 @@ class _RecordingSettingsPageState extends State<_RecordingSettingsPage> {
         _bufferGuide(muted),
         const Divider(),
         ListTile(
+          title: const Text('Lead-in for stations without track names'),
+          subtitle: Text(
+            'Some stations broadcast no song titles. There, Record keeps the '
+            'last ${_leadLabel(_leadSeconds)} before you tapped (then everything '
+            'until you tap save). Stations that do send titles always capture '
+            'the whole song from its start, regardless of this.',
+            style: TextStyle(color: _buffering ? null : muted),
+          ),
+        ),
+        Slider(
+          value: _recLeadOptions
+              .indexOf(_leadSeconds)
+              .clamp(0, _recLeadOptions.length - 1)
+              .toDouble(),
+          min: 0,
+          max: (_recLeadOptions.length - 1).toDouble(),
+          divisions: _recLeadOptions.length - 1,
+          label: _leadLabel(_leadSeconds),
+          onChanged: _buffering
+              ? (v) => setState(() => _leadSeconds = _recLeadOptions[v.round()])
+              : null,
+          onChangeEnd: _buffering
+              ? (v) => _setLeadSeconds(_recLeadOptions[v.round()])
+              : null,
+        ),
+        const Divider(),
+        ListTile(
           title: const Text('Save recordings to'),
           subtitle: Text(
             hasDir
@@ -1585,12 +1769,9 @@ class _RecordingSettingsPageState extends State<_RecordingSettingsPage> {
         Padding(
           padding: const EdgeInsets.all(16),
           child: Text(
-            widget.streamBitrateKbps != null
-                ? 'Recordings keep the stream\'s own bitrate '
-                    '(${widget.streamBitrateKbps} kbps) — no re-encoding, so '
-                    'they\'re lossless and saved instantly.'
-                : 'Recordings keep the stream\'s own bitrate — no re-encoding, '
-                    'so they\'re lossless and saved instantly.',
+            'Recordings do not re-encode the stream. They are saved directly at '
+            'the same bitrate and audio format than what the radio station '
+            'broadcasted.',
             style: TextStyle(color: muted),
           ),
         ),
@@ -2064,6 +2245,22 @@ class _RecordingsPageState extends State<_RecordingsPage> {
             icon: const Icon(Icons.file_upload_outlined),
             tooltip: 'Export list to CSV',
             onPressed: _files.isEmpty ? null : _export,
+          ),
+          IconButton(
+            icon: const Icon(Icons.settings),
+            tooltip: 'Recording settings',
+            onPressed: () async {
+              await Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => const _RecordingSettingsPage(),
+                ),
+              );
+              // The output folder may have changed — re-list, but only while
+              // idle so we don't disturb the index of an in-progress playback.
+              if (!mounted || _index >= 0) return;
+              final files = await listRecordings();
+              if (mounted) setState(() => _files = files);
+            },
           ),
         ],
       ),

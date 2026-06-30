@@ -136,11 +136,18 @@ class IcyReader {
   Duration Function(int attempt) reconnectDelay =
       (attempt) => Duration(seconds: (1 << attempt).clamp(1, 30));
 
+  // When the stream has no inline metadata (no `icy-metaint`), whether to keep
+  // the connection open and forward the raw audio anyway (so the recorder can
+  // buffer/record title-less stations). The caller sets this from its buffering
+  // pref so we don't double-download a station we'll never record from.
+  bool _bufferWithoutMetadata = false;
+
   Future<void> start(
     String url, {
     required void Function(String title) onTitle,
     void Function(List<int> audioBytes)? onAudio,
     void Function(MetadataStatus status)? onStatus,
+    bool bufferWithoutMetadata = false,
   }) async {
     await stop(); // bumps the generation, cancels any prior connection/timer
     final gen = _generation;
@@ -148,6 +155,7 @@ class IcyReader {
     _onTitle = onTitle;
     _onAudio = onAudio;
     _onStatus = onStatus;
+    _bufferWithoutMetadata = bufferWithoutMetadata;
     _attempts = 0;
     await _connect(gen);
   }
@@ -173,11 +181,17 @@ class IcyReader {
       final metaInt =
           int.tryParse(resp.headers.value('icy-metaint') ?? '') ?? 0;
       if (metaInt <= 0) {
-        // Server isn't sending interleaved metadata; nothing to read. This is a
-        // stable station-side fact, not a failure — don't reconnect.
+        // No interleaved metadata (no titles to parse). It's a stable station
+        // fact, so `unsupported` either way. But the whole body is pure audio —
+        // when asked, keep streaming it to the recorder (manual recording of
+        // title-less stations); otherwise close to save the bandwidth.
         _onStatus?.call(MetadataStatus.unsupported);
-        client.close(force: true);
-        _client = null;
+        if (_bufferWithoutMetadata) {
+          _listenRaw(resp, gen);
+        } else {
+          client.close(force: true);
+          _client = null;
+        }
         return;
       }
       _onStatus?.call(MetadataStatus.waitingForFirstTitle);
@@ -219,6 +233,20 @@ class IcyReader {
     );
   }
 
+  /// For streams with no inline metadata: forward every byte as audio (there's
+  /// nothing to parse out), reconnecting on a drop just like [_listen].
+  void _listenRaw(Stream<List<int>> stream, int gen) {
+    _sub = stream.listen(
+      (chunk) {
+        if (gen != _generation) return;
+        _onAudio?.call(chunk);
+      },
+      onError: (_) => _scheduleReconnect(gen),
+      onDone: () => _scheduleReconnect(gen),
+      cancelOnError: true,
+    );
+  }
+
   void _scheduleReconnect(int gen) {
     if (gen != _generation) return;
     // Tear down the current (dead) connection before retrying.
@@ -248,6 +276,10 @@ class IcyReader {
     _sub = null;
     _client?.close(force: true);
     _client = null;
+    // Clear so a previous station's format/bitrate can't show while the next one
+    // is still connecting (they're repopulated from the new response headers).
+    contentType = null;
+    bitrateKbps = null;
     _onStatus?.call(MetadataStatus.idle);
   }
 }

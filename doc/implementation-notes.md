@@ -358,6 +358,30 @@ current track, so "record" just commits the buffer and keeps going.
   can re-arm). The button is hidden entirely when `rec_buffering` is off. While a
   recording is armed the now-playing card gets a thin, diffused red neon glow
   (`_recording`).
+- **Title-less stations (manual recording).** A station with no `icy-metaint`
+  (e.g. FIP) sends no titles, and historically fed the recorder no audio either.
+  Now `IcyReader.start(bufferWithoutMetadata:)` — set from `_recBuffering` — keeps
+  that connection open and forwards the raw body to `onAudio` (`_listenRaw`), so
+  the buffer fills (the second download only runs when buffering is on, so we
+  don't double-download a station we'll never record). `_canRecord` then allows
+  recording when there's a fresh title **or** the station is `unsupported`. Such a
+  recording is **manual** (`_manualRecording`): with no track change to finalize
+  on, tapping Record again **saves** (`_saveManualRecording` → `onTrackChanged`)
+  rather than cancelling, and the file is named `<station> <YYYY-MM-DD HH.MM>`
+  (no `Artist - Title`). It still auto-saves if you stop or switch stations.
+  Toggling `rec_buffering` while on such a station restarts the reader so the raw
+  stream starts/stops to match.
+- **Lead-in cap (`rec_lead_seconds`).** A title-less station has no song
+  boundary, so the buffer could otherwise prepend many minutes of unrelated audio
+  to a manual recording. The setting (slider: 0/30s/1/2/3/4 min/Max, default 1 min;
+  -1 = whole buffer) caps how much pre-tap audio is kept. The player turns seconds
+  into bytes via the stream bitrate (`_icy.bitrateKbps`, fallback 128 kbps) and
+  passes `leadInBytes:` to `arm`; the recorder tracks each segment's logical
+  `startOffset` against a monotonic `_writtenBytes` counter and, at finalize,
+  emits from `_recordStartOffset = max(oldestRetained, written − leadInBytes)`
+  (skipping the front of the first segment as needed). **Titled recordings pass
+  `null`** (whole buffer) — their buffer already begins at the song's start, so
+  this never truncates a real song.
 - **Staying alive in the background (Android).** Both playback **and** the
   recording path — `IcyReader`'s HTTP socket loop plus the track-change detection
   that finalizes a recording — run on the **main isolate**. With the screen off
