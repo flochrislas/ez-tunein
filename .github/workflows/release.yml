@@ -92,7 +92,7 @@ jobs:
 
       - name: Name the artifact
         run: cp build/app/outputs/flutter-apk/app-release.apk "ez-tunein-${{ github.ref_name }}-android.apk"
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: android
           path: ez-tunein-*-android.apk
@@ -124,7 +124,7 @@ jobs:
         run: |
           mv build/linux/x64/release/bundle ez-tunein-linux-x64
           tar czf "ez-tunein-${{ github.ref_name }}-linux-x64.tar.gz" ez-tunein-linux-x64
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: linux
           path: ez-tunein-*-linux-x64.tar.gz
@@ -155,7 +155,7 @@ jobs:
         run: |
           Copy-Item -Recurse build/windows/x64/runner/Release ez-tunein-windows-x64
           Compress-Archive -Path ez-tunein-windows-x64 -DestinationPath "ez-tunein-${{ github.ref_name }}-windows-x64.zip"
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: windows
           path: ez-tunein-*-windows-x64.zip
@@ -166,11 +166,11 @@ jobs:
     needs: [android, linux, windows]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
       - name: Publish draft release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           draft: true               # review & publish manually
           generate_release_notes: true
