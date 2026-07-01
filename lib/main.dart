@@ -293,18 +293,18 @@ const _defaultStations = <Station>[
       'https://funkyradio.streamingmedia.it/play.mp3'),
   Station('Funky Radio (Classic Uncut Funk) — 192kbps AAC',
       'https://funkyradio.streamingmedia.it/audio.aac'),
-  Station('WEFUNK Radio — 128kbps MP3',
-      'http://stream.wefunkradio.com:8000/wefunk'),
-  Station('Funky Corner Radio — 128kbps MP3',
-      'http://icecast.unitedradio.it/FunkyCornerRadio'),
+  Station('Le Mellotron (Soul / Funk / Hip-Hop) — 128kbps MP3',
+      'https://listen.radioking.com/radio/477719/stream/534044'),
+  Station('Funky Corner Radio — 192kbps MP3',
+      'https://ais-sa2.cdnstream1.com/2447_192.mp3'),
   Station('B4B Disco Funk — 128kbps MP3',
-      'http://b4b-disco-funk.ice.infomaniak.ch/b4b-disco-funk-128.mp3'),
+      'https://eu10.fastcast4u.com:8120/stream?sid=1'),
   Station('Radio Meuh — 128kbps MP3',
       'http://radiomeuh.ice.infomaniak.ch/radiomeuh-128.mp3'),
   Station('Classic Rock Replay (1.FM) — 192kbps MP3',
       'http://185.33.21.112:80/crock_64a'),
-  Station(
-      'Progulus Radio — 192kbps MP3', 'http://stream.progulus.com:8000/live'),
+  Station('Progulus Radio — 192kbps MP3',
+      'https://centova.radioservers.biz/proxy/klemmer/stream'),
   Station('Morow — 128kbps MP3', 'http://stream.morow.com:8080/morow_med.mp3'),
   Station('Radio BOB! Prog-Rock — 192kbps MP3',
       'http://streams.radiobob.de/progrock/mp3-192/homepage'),
@@ -327,7 +327,7 @@ const _defaultStations = <Station>[
   Station(
       'Skyrock — 128kbps MP3', 'http://icecast.skyrock.net/s/natio_mp3_128k'),
   Station('Générations — 128kbps MP3',
-      'http://broadcast.infomaniak.net/generationfm-high.mp3'),
+      'https://generationfm.ice.infomaniak.ch/generationfm-high.mp3'),
   Station('J-Pop Powerplay — 128kbps MP3',
       'https://kathy.torontocast.com:3560/stream'),
   Station('J-Rock Powerplay — 128kbps MP3',
@@ -343,8 +343,6 @@ const _defaultStations = <Station>[
       'http://relay1.slayradio.org:8000/'),
   Station(
       'Bigbeat-Radio — 128kbps MP3', 'https://stream.laut.fm/bigbeat-radio'),
-  Station('Record Breakbeat — 128kbps MP3',
-      'http://air2.radiorecord.ru:805/brb_128'),
   Station('Joint Radio Reggae — 128kbps MP3',
       'http://radio.jointil.net:9998/stream'),
   Station('Skafari — 128kbps MP3', 'https://stream.laut.fm/skafari'),
@@ -362,8 +360,8 @@ const _defaultStations = <Station>[
   Station('Dubstep.fm — 256kbps MP3', 'http://stream.dubstep.fm/256mp3'),
   Station('Dubstep.fm — 128kbps MP3', 'http://stream.dubstep.fm/128mp3'),
   Station('Best of Trap — 128kbps MP3', 'https://stream.laut.fm/bestoftrap'),
-  Station('Neverdie Radio (Dubstep) — 128kbps MP3',
-      'https://stream.laut.fm/neverdie-radio'),
+  Station('Sub.FM (Dubstep / Garage / Grime) — 192kbps MP3',
+      'http://subfm.radioca.st/Sub.FM'),
   Station('Radio BOB! Nu Metal — 192kbps MP3',
       'https://streams.radiobob.de/numetal/mp3-192/'),
   Station('Radio BOB! Rap Metal — 192kbps MP3',
@@ -459,7 +457,13 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   @override
   void initState() {
     super.initState();
-    if (isDesktop) windowManager.addListener(this);
+    if (isDesktop) {
+      windowManager.addListener(this);
+      // Intercept the window close so we can quiesce audio before the engine
+      // tears down — closing mid-stream otherwise races media_kit's native
+      // shutdown and segfaults. See onWindowClose.
+      unawaited(windowManager.setPreventClose(true));
+    }
     // ICY callbacks are wired per-station in _play (with a session guard); see
     // there. Just the output-folder resolver and the service hook here.
     _recorder.outputDirResolver = _resolveOutputDir;
@@ -710,6 +714,24 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     } catch (e) {
       _snack('Export failed: $e');
     }
+  }
+
+  bool _closing = false; // guards onWindowClose against re-entry
+
+  // Desktop window-close handler (WindowListener). setPreventClose(true) routes
+  // the close here first. Closing while media_kit is playing races its native
+  // shutdown and segfaults (the engine also errors removing its implicit view),
+  // so we finalize any in-progress recording via _stop() and then hard-exit,
+  // skipping the racy engine/plugin teardown entirely. exit() also covers the
+  // recordings library's separate AudioPlayer, which this State can't reach.
+  @override
+  void onWindowClose() async {
+    if (_closing) return;
+    _closing = true;
+    try {
+      await _stop();
+    } catch (_) {}
+    exit(0);
   }
 
   @override
