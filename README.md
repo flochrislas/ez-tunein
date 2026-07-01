@@ -1,10 +1,31 @@
 # EZ-TuneIn Radio
 
-A minimalist, lightweight internet radio player. Tune into your favourite online
-radio stations, see what's playing right now, and save the songs you love — all
-from one clean, dark interface.
+**Hear a song you love on the radio — and actually keep it.**
+
+EZ-TuneIn is a minimalist internet-radio player that does what most players
+don't: it **records the whole song to your device** — and it works even if you
+hit **Record** *after* the song already started, because it quietly buffers the
+stream as you listen, so you never miss the intro. Recordings are **lossless and
+instant**: the station's own audio, saved as-is, with no re-encoding.
+
+It also **logs every track that plays** and lets you **save the ones you like**
+with one tap, then **export your list** as a plain CSV to open in a spreadsheet
+or take anywhere.
+
+All from one clean, dark interface — light on resources, no account, no ads.
 
 Runs on **Windows**, **macOS**, **Linux**, and **Android**.
+
+## Screenshots
+
+<p align="center">
+  <img src="doc/screenshots/player.png" alt="Player with live now-playing track" width="32%">
+  <img src="doc/screenshots/recording-settings.png" alt="Recording settings with buffer-size guide" width="32%">
+  <img src="doc/screenshots/recordings-library.png" alt="Recordings library with seek bar" width="32%">
+</p>
+<p align="center">
+  <em>Now playing&nbsp;&nbsp;·&nbsp;&nbsp;Recording settings (buffer-size guide)&nbsp;&nbsp;·&nbsp;&nbsp;Recordings library</em>
+</p>
 
 ## Features
 
