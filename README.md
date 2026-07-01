@@ -4,7 +4,7 @@ A minimalist, lightweight internet radio player. Tune into your favourite online
 radio stations, see what's playing right now, and save the songs you love — all
 from one clean, dark interface.
 
-Runs on **Windows**, **Linux**, and **Android**.
+Runs on **Windows**, **macOS**, **Linux**, and **Android**.
 
 ## Features
 
@@ -82,6 +82,15 @@ Download `ez-tunein-<version>-windows-x64.zip`, extract it anywhere, and run
 **`ez_tunein.exe`** — nothing else to install. Windows may show a blue
 **SmartScreen** warning ("Windows protected your PC") because the app isn't signed
 yet; click **More info → Run anyway**.
+
+### macOS
+
+Download `ez-tunein-<version>-macos.dmg`, open it, and drag **EZ-TuneIn** into the
+**Applications** folder. The app isn't signed with a paid Apple certificate, so the
+first time you launch it macOS says *"EZ-TuneIn cannot be opened because the developer
+cannot be verified."* — **right-click (or Control-click) the app → Open**, then confirm
+**Open** in the dialog. You only need to do this once. The `.dmg` is universal, so it
+runs on both Intel and Apple Silicon Macs.
 
 ### Linux
 

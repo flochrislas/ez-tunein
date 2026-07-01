@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- No App Sandbox: this is an unsigned, direct-download build (not App
+	     Store). Dropping the sandbox gives the app full network + filesystem
+	     access with no entitlement tuning, so streams connect and recordings
+	     reach real folders. Re-add com.apple.security.app-sandbox (plus
+	     network.client + file entitlements) if ever targeting the App Store. -->
+</dict>
+</plist>

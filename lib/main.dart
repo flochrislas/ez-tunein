@@ -1240,7 +1240,9 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
             .toList();
     return Scaffold(
       appBar: AppBar(
-        title: const Text('EZ-TuneIn Radio'),
+        // Phones are width-constrained, so drop "Radio" from the app-bar name
+        // on Android; desktop keeps the full title.
+        title: Text(Platform.isAndroid ? 'EZ-TuneIn' : 'EZ-TuneIn Radio'),
         actions: [
           IconButton(
             icon: const Icon(Icons.search),

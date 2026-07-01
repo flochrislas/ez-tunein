@@ -1,7 +1,7 @@
 name: ez_tunein
 description: Minimalist internet radio player that saves the current track to a CSV file.
 publish_to: 'none'
-version: 0.7.0+7
+version: 0.8.0+8
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -31,6 +31,28 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^4.0.0
+  # Generates native launcher icons for Android/macOS/Windows from a single
+  # source image. Run after changing assets/icon/: `dart run flutter_launcher_icons`.
+  flutter_launcher_icons: ^0.14.1
 
 flutter:
   uses-material-design: true
+  # Bundled so the Linux GTK runner can set the window/taskbar icon at runtime
+  # (flutter_launcher_icons doesn't cover Linux). See linux/runner/my_application.cc.
+  assets:
+    - assets/icon/app_icon_256.png
+
+# App launcher icons. Regenerate with: dart run flutter_launcher_icons
+# Source art lives in assets/icon/. Linux is handled natively (see above).
+flutter_launcher_icons:
+  image_path: "assets/icon/icon.png"
+  android: true
+  adaptive_icon_background: "assets/icon/icon_background.png"
+  adaptive_icon_foreground: "assets/icon/icon_foreground.png"
+  macos:
+    generate: true
+    image_path: "assets/icon/icon.png"
+  windows:
+    generate: true
+    image_path: "assets/icon/icon.png"
+    icon_size: 256

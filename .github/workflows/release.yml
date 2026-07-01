@@ -7,6 +7,7 @@
 #   - ez-tunein-<tag>-android.apk        (signed, see secrets below)
 #   - ez-tunein-<tag>-linux-x64.tar.gz   (needs libmpv on the user's machine)
 #   - ez-tunein-<tag>-windows-x64.zip    (unsigned — see doc/windows-signing.md)
+#   - ez-tunein-<tag>-macos.dmg          (unsigned, ad-hoc signed — right-click → Open)
 #
 # Required repository secrets (Settings → Secrets and variables → Actions) for
 # the signed Android build — matching your android/key.properties:
@@ -161,9 +162,67 @@ jobs:
           path: ez-tunein-*-windows-x64.zip
           if-no-files-found: error
 
+  # ------------------------------------------------------------------ macOS
+  # Unsigned, direct-download .dmg built entirely on a hosted runner — no Mac
+  # hardware and no Apple Developer Program ($0). The .app is *ad-hoc* signed
+  # (codesign --sign -, free, no certificate) because Apple Silicon hard-refuses
+  # a truly unsigned binary ("app is damaged"); the user still right-click →
+  # Open the first time to clear Gatekeeper (like Windows SmartScreen).
+  macos:
+    needs: verify
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - run: flutter config --enable-macos-desktop
+      - run: flutter pub get
+      - run: flutter build macos --release
+
+      # Guard the "-macos" (arch-agnostic) name: fail loudly if the binary isn't
+      # universal (arm64 + x86_64) rather than shipping a mislabeled .dmg. If a
+      # plugin dylib ever forces a single-arch build, drop this and rename the
+      # artifact to -macos-arm64.dmg.
+      - name: Assert the build is universal
+        run: |
+          bin=build/macos/Build/Products/Release/ez_tunein.app/Contents/MacOS/ez_tunein
+          archs=$(lipo -archs "$bin")
+          echo "Executable architectures: $archs"
+          for want in arm64 x86_64; do
+            case " $archs " in
+              *" $want "*) ;;
+              *) echo "::error::Expected a universal binary but '$want' is missing (got: $archs). Either fix the build or rename the artifact to -macos-<arch>.dmg."; exit 1 ;;
+            esac
+          done
+
+      - name: Ad-hoc codesign
+        run: >
+          codesign --force --deep --sign -
+          build/macos/Build/Products/Release/ez_tunein.app
+
+      - name: Package the .dmg
+        run: |
+          staging=dmg-staging
+          mkdir -p "$staging"
+          cp -R build/macos/Build/Products/Release/ez_tunein.app "$staging/"
+          ln -s /Applications "$staging/Applications"   # drag-to-install target
+          # A universal (arm64 + x86_64) build ⇒ one .dmg for Intel & Apple
+          # Silicon, hence the plain "-macos" suffix (no -x64).
+          hdiutil create -volname "EZ-TuneIn" -srcfolder "$staging" \
+            -ov -format UDZO "ez-tunein-${{ github.ref_name }}-macos.dmg"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos
+          path: ez-tunein-*-macos.dmg
+          if-no-files-found: error
+
   # ---------------------------------------------------------------- Release
   release:
-    needs: [android, linux, windows]
+    needs: [android, linux, windows, macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v8
@@ -184,3 +243,6 @@ jobs:
               Windows may warn with "Unknown Publisher" — click **More info → Run anyway**.
             - **Linux** — `*-linux-x64.tar.gz` (extract, run `./ez-tunein-linux-x64/ez_tunein`).
               Requires **libmpv** installed: `sudo apt install -y libmpv-dev mpv`.
+            - **macOS** — `*-macos.dmg` (open it, drag **EZ-TuneIn** to Applications).
+              Unsigned: on first launch, **right-click the app → Open** to bypass Gatekeeper's
+              "developer cannot be verified" warning.
