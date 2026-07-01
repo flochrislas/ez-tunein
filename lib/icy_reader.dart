@@ -176,10 +176,14 @@ class IcyReader {
         client.close(force: true);
         return;
       }
-      contentType = resp.headers.value('content-type')?.trim();
-      bitrateKbps = int.tryParse(resp.headers.value('icy-br') ?? '');
+      // Read headers via [] (first value) rather than value(), which THROWS on a
+      // header sent more than once. Nightride/Rekt streams send `icy-br` twice,
+      // which used to throw here, get swallowed by the catch below, and reconnect
+      // forever — the station stayed stuck on "Connecting…" despite valid ICY.
+      contentType = resp.headers['content-type']?.first.trim();
+      bitrateKbps = int.tryParse(resp.headers['icy-br']?.first ?? '');
       final metaInt =
-          int.tryParse(resp.headers.value('icy-metaint') ?? '') ?? 0;
+          int.tryParse(resp.headers['icy-metaint']?.first ?? '') ?? 0;
       if (metaInt <= 0) {
         // No interleaved metadata (no titles to parse). It's a stable station
         // fact, so `unsupported` either way. But the whole body is pure audio —

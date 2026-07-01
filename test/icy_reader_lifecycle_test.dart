@@ -145,6 +145,59 @@ void main() {
     expect(statuses.last, MetadataStatus.idle);
   });
 
+  test('a duplicated icy-br header still reaches active (Nightride/Rekt)',
+      () async {
+    // Regression: Nightride/Rekt Icecast mounts send `icy-br` on TWO separate
+    // header lines. Dart's client keeps those as a 2-element list, and reading
+    // it with HttpHeaders.value() throws ("more than one value"). The connect
+    // path swallowed that and turned it into an endless reconnect — the station
+    // was stuck on "Connecting…" forever despite perfectly valid ICY metadata.
+    // The reader must read the first value instead and proceed normally.
+    //
+    // A raw ServerSocket is used (not HttpServer) because HttpServer folds
+    // duplicate headers into one comma-joined value, which does NOT reproduce
+    // the two-separate-lines framing nginx actually emits.
+    final socketServer =
+        await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    // Keep the shared tearDown happy (it closes `server`); this test manages its
+    // own raw server, so give `server` a throwaway bound HttpServer.
+    server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+
+    socketServer.listen((socket) async {
+      final body = <int>[
+        1, 2, 3, 4, // metaInt audio bytes
+        ...metaBlock("StreamTitle='Venturer - Fugitive';StreamUrl='';"),
+      ];
+      socket.add(utf8.encode('HTTP/1.1 200 OK\r\n'
+          'content-type: audio/mpeg\r\n'
+          'icy-metaint: 4\r\n'
+          'icy-br: 320\r\n' // two separate lines, exactly like nginx
+          'icy-br: 320\r\n'
+          '\r\n'));
+      socket.add(body);
+      await socket.flush();
+      // Hold the connection open so we don't churn into a reconnect mid-test.
+      await Future<void>.delayed(const Duration(seconds: 2));
+      await socket.close();
+    });
+
+    final statuses = <MetadataStatus>[];
+    final titles = <String>[];
+    final reader = IcyReader()
+      ..reconnectDelay = (_) => const Duration(seconds: 60);
+    final url = 'http://${socketServer.address.host}:${socketServer.port}/';
+    await reader.start(url, onTitle: titles.add, onStatus: statuses.add);
+
+    await pumpUntil(() => statuses.contains(MetadataStatus.active),
+        reason: 'active despite duplicate icy-br');
+    expect(titles, contains('Venturer - Fugitive'));
+    expect(reader.bitrateKbps, 320); // the duplicated header still parsed
+
+    await reader.stop();
+    expect(statuses.last, MetadataStatus.idle);
+    await socketServer.close();
+  });
+
   test('keeps reconnecting, then reports failed after the attempt budget',
       () async {
     server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
