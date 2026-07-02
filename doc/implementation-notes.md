@@ -11,7 +11,8 @@ A minimalist internet-radio player:
 1. Plays Icecast/Shoutcast streams (SomaFM, SwissGroove, …).
 2. Shows the live "now playing" track (artist + title).
 3. Saves the current track to a CSV file on a button click.
-4. Lets you add/remove stations (and import/export the list as a CSV), filter the
+4. Lets you add stations by **searching the online Radio Browser directory** (or
+   manually), remove them, import/export the list as a CSV, filter the
    list by name (type-to-search), adjust & persist volume, browse/sort/copy/clear
    saved tracks, keeps an automatic **play history** (with a logging on/off
    toggle), and (on desktop) remembers its window size.
@@ -131,6 +132,7 @@ controller. Modules:
 | `lib/icy_reader.dart` | `MetadataStatus`, pure `IcyParser`, `IcyReader`. |
 | `lib/stream_recorder.dart` | `StreamRecorder` + filename/extension/unique-path statics. |
 | `lib/storage_paths.dart` | `isDesktop`, `recDirKey`, `recordingsDir`, `savedTracksFile`, `historyFile`, `listRecordings`, `isAudioFile`. |
+| `lib/radio_browser.dart` | `RadioBrowserStation`, pure `parseRadioBrowserStations`, `searchRadioBrowser` (online station-search backend). |
 | `lib/csv_utils.dart` | `parseCsv` / `csvField`. |
 | `lib/track_utils.dart` | `splitArtistTitle`, `fmtDateTime`, `fmtDuration`. |
 | `test/` | Unit tests for the modules above. |
@@ -146,6 +148,7 @@ Key symbols:
 | `PlayerPage` / `_PlayerPageState` | The main screen. Owns the `AudioPlayer`, the `IcyReader`, the station list, volume, and (via `WindowListener`) window-resize persistence. `_recordHistory` logs each played song (see [Play history](#play-history)). |
 | `_StationTile` | A station row that reveals its edit + delete buttons only on hover (`MouseRegion`). |
 | `_actionTile` | The dimmed/italic list rows for add / import / export at the end of the station list. |
+| `_StationSearchPage` | The online station-search screen (Radio Browser keyword search, multi-select, favicons) opened by "Add a new radio station…"; its pencil action opens the manual `_StationDialog`. See [Online station search](#online-station-search-radio-browser). |
 | `_searchBar` / `_openSearch` / `_closeSearch` / `_onPageKey` | The type-to-search station filter (see [Filtering](#filtering--type-to-search)). |
 | `_importStations` / `_exportStations` | Import/export the station list as a `name,url` CSV via `file_picker`. |
 | `_StationDialog` | Name + URL + colour-picker dialog; returns a `Station`. Pre-fills from `initial` to edit (vs. add). |
@@ -250,6 +253,35 @@ Key symbols:
   file sharing on Linux, so this branch sidesteps that too.
 
 The action is disabled when the list is empty.
+
+### Online station search (Radio Browser)
+
+The **"Add a new radio station…"** row no longer opens the manual dialog
+directly — it pushes **`_StationSearchPage`**, which lets the user search the
+free, no-key **[Radio Browser](https://www.radio-browser.info) API** by keyword,
+tick one or several results, and add them at once. The page pops a
+`List<Station>` and `_addStation` merges it with the **same `Set.add`
+non-destructive dedup** as import. The app-bar **pencil** on that page opens the
+classic manual `_StationDialog` and pops its single result through the same path,
+so the manual flow still exists.
+
+The network/parse logic lives in **`lib/radio_browser.dart`** (UI-free, so the
+parser is unit-tested in `test/radio_browser_test.dart`):
+
+- `searchRadioBrowser(query)` does a `GET /json/stations/search?name=…&hidebroken=true&order=votes&reverse=true`
+  over a **new `dart:io HttpClient`** (no `package:http`; same primitive as
+  `IcyReader`). It tries `all.api.radio-browser.info` (round-robin DNS) then named
+  mirrors (`de1`/`de2`/`nl1`) on failure, sends a `ez_tunein/<version>`
+  User-Agent (the API asks for a "speaking" agent), and times out at ~8 s.
+- `parseRadioBrowserStations(body)` (pure) decodes the JSON array, tolerates the
+  API's mixed field types, and drops rows with no name or no playable URL.
+- Each result maps to a `Station` using **`streamUrl`** — `url_resolved` (the
+  API's already-unwrapped **direct** stream URL, exactly what this app requires)
+  falling back to `url`. So online results never need playlist unwrapping.
+
+Result rows show the station favicon (`Image.network` with a radio-icon fallback
+for missing/broken images), the name, and a `country · codec · bitrate · tags`
+subtitle; rows whose URL is already in the list are disabled and marked "Added".
 
 ### Import / export the station list
 

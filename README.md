@@ -64,10 +64,15 @@ Runs on **Windows**, **macOS**, **Linux**, and **Android**.
 - **Export your list** — on mobile, **Share** the saved-tracks CSV via the system
   share sheet (email it to yourself, send it to your PC, save to Drive…); on
   desktop the file's already in your Documents folder and the button reveals it.
-- **Manage your stations** — add a station with the **+** button, or hover a
-  station to reveal **edit** (rename, change the URL, or give it a **colour**) and
-  **delete** icons. Colour a station to tag it by genre or flag a favourite — its
-  name and icon show in that colour. Your list is remembered between launches.
+- **Find stations online** — the **+** button opens a **keyword search** of the
+  worldwide [Radio Browser](https://www.radio-browser.info) directory: type a name,
+  genre, or city, tick one or several results, and add them all at once (no stream URL
+  to hunt down — it fills in the direct link for you). Prefer to type it in yourself?
+  The **pencil** in that screen opens the classic name + URL form.
+- **Manage your stations** — hover a station to reveal **edit** (rename, change the URL,
+  or give it a **colour**) and **delete** icons. Colour a station to tag it by genre or
+  flag a favourite — its name and icon show in that colour. Your list is remembered
+  between launches.
 - **Import / export your stations** — back up or share your station list as a
   simple `name,url` CSV, and import one back in (new stations are merged in;
   duplicates are skipped). Both live at the bottom of the station list.
@@ -214,13 +219,17 @@ Full walkthrough, gotchas, and release-signing notes:
 
 ## Adding / changing stations
 
-Use the **+** button in the app to add a station (name + direct stream URL), and
-hover a station to reveal **edit** and **delete** buttons. Your list is saved
+Use the **+** button in the app to add a station. It opens an **online search** of
+the [Radio Browser](https://www.radio-browser.info) directory — type a keyword, tick
+the results you want, and add them (their direct stream URLs are filled in for you).
+The **pencil** icon on that screen switches to the manual name + URL form. Hover a
+station in the list to reveal **edit** and **delete** buttons. Your list is saved
 between launches.
 The defaults in `_defaultStations` (top of `lib/main.dart`) only seed the very
 first launch.
 
-> Stream URLs must be **direct** — not `.pls`/`.m3u` playlist links.
+> Stream URLs must be **direct** — not `.pls`/`.m3u` playlist links. (Online search
+> uses Radio Browser's already-resolved direct URLs, so it handles this for you.)
 
 The first launch seeds a sizeable curated set (see `radios-selection.csv`); to
 find one quickly, just **start typing** to filter by name (or tap the search icon
