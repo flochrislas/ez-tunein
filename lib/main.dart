@@ -15,57 +15,17 @@ import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 
+import 'app_prefs.dart';
 import 'audio_handler.dart';
 import 'csv_utils.dart';
 import 'icy_reader.dart';
+import 'models/saved_track.dart';
+import 'models/station.dart';
 import 'radio_browser.dart';
+import 'settings/color_swatch.dart';
 import 'storage_paths.dart';
 import 'stream_recorder.dart';
 import 'track_utils.dart';
-
-const _winWidthKey = 'win_w';
-const _winHeightKey = 'win_h';
-// Accent color (the Material 3 seed): drives sliders, switches, and filled
-// buttons app-wide. Stored as an ARGB int; the notifier lets a change in the
-// Settings view re-theme the whole app live. Default is teal (0xFF009688).
-const _accentColorKey = 'accent_color';
-const _defaultAccentValue = 0xFF009688;
-final accentColor = ValueNotifier<Color>(const Color(_defaultAccentValue));
-// Whether the player logs played songs to the history CSV. Toggled from the
-// History view, read by the player; defaults to on. Top-level so both screens
-// share it (shared_preferences returns one cached instance, so a write here is
-// immediately visible to the player without extra plumbing).
-const _historyLoggingKey = 'history_logging';
-// Player volume (0.0–1.0); shared by the radio player and the recordings library.
-const _volumeKey = 'volume';
-
-// Recording settings (shared across the player and the recording-settings view,
-// same single-cached-instance trick as the history toggle above).
-//  - rec_buffering: whether the stream is buffered (off ⇒ no Record button).
-//  - rec_buffer_mb: buffer cap in MB (the "rewind" window before recording).
-//  - rec_dir:       output folder; null/empty ⇒ the OS Downloads folder.
-const _recBufferingKey = 'rec_buffering';
-const _recBufferMbKey = 'rec_buffer_mb';
-// rec_dir lives in storage_paths.dart (recDirKey) since recordingsDir() reads it.
-const _recBufferMbDefault = 35;
-// Cap the buffer so the synchronous trim (reads ~cap bytes into RAM) can't cause
-// a large memory spike / UI hitch. See doc/implementation-notes.md.
-const _recBufferMbMax = 128;
-// Lead-in cap (seconds) for *manual* recordings on title-less stations: how much
-// already-buffered audio to keep before the Record tap. -1 ⇒ the whole buffer.
-const _recLeadSecondsKey = 'rec_lead_seconds';
-const _recLeadSecondsDefault = 60;
-// The slider stops (seconds; -1 = whole buffer), in order.
-const _recLeadOptions = [0, 30, 60, 120, 180, 240, -1];
-// Recordings-library playback toggles (the _RecordingsPage view).
-const _recNeverStopsKey = 'rec_never_stops'; // auto-play the next file at end
-const _recRandomizeKey = 'rec_randomize'; // pick the next file at random
-
-/// The app's single media-session handler. It owns the Android MediaSession
-/// (rich notification, lock-screen, Bluetooth/car controls) and routes transport
-/// to whichever page is currently driving audio. On mobile it's created via
-/// `AudioService.init`; on desktop it's plain-constructed (no native session).
-late EzAudioHandler audioHandler;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -109,14 +69,13 @@ void main() async {
 
   // Restore the saved accent color before the first frame.
   final prefs = await SharedPreferences.getInstance();
-  accentColor.value =
-      Color(prefs.getInt(_accentColorKey) ?? _defaultAccentValue);
+  accentColor.value = Color(prefs.getInt(accentColorKey) ?? defaultAccentValue);
 
   // On desktop, restore the saved window size before showing the window.
   if (isDesktop) {
     await windowManager.ensureInitialized();
-    final w = prefs.getDouble(_winWidthKey);
-    final h = prefs.getDouble(_winHeightKey);
+    final w = prefs.getDouble(winWidthKey);
+    final h = prefs.getDouble(winHeightKey);
     await windowManager.waitUntilReadyToShow(
       WindowOptions(
         size: (w != null && h != null) ? Size(w, h) : const Size(640, 720),
@@ -149,94 +108,8 @@ Future<void> _prepareArtUri() async {
   } catch (_) {}
 }
 
-/// A radio station: a display name, an Icecast/Shoutcast stream URL, and an
-/// optional user-chosen colour (ARGB int) for its list entry — null ⇒ the
-/// default theme colour. Lets the user tag stations by genre / favourite.
-class Station {
-  const Station(this.name, this.url, {this.color});
-  final String name;
-  final String url;
-  final int? color;
-
-  Map<String, dynamic> toJson() =>
-      {'name': name, 'url': url, if (color != null) 'color': color};
-  factory Station.fromJson(Map<String, dynamic> j) => Station(
-        j['name'] as String,
-        j['url'] as String,
-        color: (j['color'] as num?)?.toInt(),
-      );
-}
-
-// Quick-pick colour swatches, shared by the accent picker and the per-station
-// colour picker (the accent picker's RGB sliders cover everything else). Ordered
-// around the hue wheel (warm → green → cyan/blue → violet → pink) then neutrals;
-// where a hue would repeat, a lighter/darker variant keeps neighbours distinct.
-const _colorPresets = <Color>[
-  Color(0xFFF44336), // red
-  Color(0xFFFF7043), // coral
-  Color(0xFFFF9800), // orange
-  Color(0xFFFFC107), // amber
-  Color(0xFFFFEB3B), // yellow
-  Color(0xFFCDDC39), // lime
-  Color(0xFF8BC34A), // light green
-  Color(0xFF43A047), // green
-  Color(0xFF1B5E20), // dark green
-  Color(0xFF009688), // teal (the default accent)
-  Color(0xFF00BCD4), // cyan
-  Color(0xFF29B6F6), // light blue
-  Color(0xFF1E88E5), // blue
-  Color(0xFF0D47A1), // navy
-  Color(0xFF5C6BC0), // indigo
-  Color(0xFF7E57C2), // deep purple
-  Color(0xFF9C27B0), // purple
-  Color(0xFFE91E63), // pink
-  Color(0xFF880E4F), // dark rose
-  Color(0xFF795548), // brown
-  Color(0xFF607D8B), // blue grey
-  Color(0xFF9E9E9E), // grey
-  Color(0xFFFFFFFF), // white
-];
-
-/// A round, tappable colour chip (with a check + ring when selected). Shared by
-/// the accent picker and the per-station colour picker.
-class _ColorSwatch extends StatelessWidget {
-  const _ColorSwatch({
-    required this.color,
-    required this.selected,
-    required this.onTap,
-    this.size = 34,
-  });
-  final Color color;
-  final bool selected;
-  final VoidCallback onTap;
-  final double size;
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      customBorder: const CircleBorder(),
-      child: Container(
-        width: size,
-        height: size,
-        decoration: BoxDecoration(
-          color: color,
-          shape: BoxShape.circle,
-          border: Border.all(
-            color: selected ? Colors.white : Colors.white24,
-            width: selected ? 3 : 1,
-          ),
-        ),
-        child: selected
-            ? Icon(Icons.check, size: size * 0.5, color: Colors.white)
-            : null,
-      ),
-    );
-  }
-}
-
 // The list users start with on first launch; afterwards it's whatever they've
-// saved (see _stationsKey). Add/remove from the UI.
+// saved (see stationsKey). Add/remove from the UI.
 // Sourced from radios-selection.csv — keep the two in sync if you curate the set.
 const _defaultStations = <Station>[
   // Direct relay from swissgroove.ch's listen.php M3U.
@@ -406,8 +279,6 @@ class _PlayerPageState extends State<PlayerPage>
   final _icy = IcyReader();
   Timer? _resizeDebounce;
 
-  static const _stationsKey = 'stations';
-
   SharedPreferences? _prefs;
   List<Station> _stations = List.of(_defaultStations);
   Station? _current;
@@ -440,9 +311,8 @@ class _PlayerPageState extends State<PlayerPage>
   // True when the in-progress recording is user-bounded (a title-less station,
   // so there's no track change to auto-save on — the user taps again to save).
   bool _manualRecording = false;
-  bool _recBuffering =
-      true; // mirrors _recBufferingKey; gates the Record button
-  int _recLeadSeconds = _recLeadSecondsDefault; // mirrors _recLeadSecondsKey
+  bool _recBuffering = true; // mirrors recBufferingKey; gates the Record button
+  int _recLeadSeconds = recLeadSecondsDefault; // mirrors recLeadSecondsKey
   String _lastRecTitle = '';
 
   // Type-to-search filter over station names. On desktop, typing a printable
@@ -478,8 +348,8 @@ class _PlayerPageState extends State<PlayerPage>
     _resizeDebounce?.cancel();
     _resizeDebounce = Timer(const Duration(milliseconds: 400), () async {
       final size = await windowManager.getSize();
-      await _prefs?.setDouble(_winWidthKey, size.width);
-      await _prefs?.setDouble(_winHeightKey, size.height);
+      await _prefs?.setDouble(winWidthKey, size.width);
+      await _prefs?.setDouble(winHeightKey, size.height);
     });
   }
 
@@ -487,20 +357,20 @@ class _PlayerPageState extends State<PlayerPage>
     final prefs = await SharedPreferences.getInstance();
     _prefs = prefs;
 
-    final savedVolume = prefs.getDouble(_volumeKey);
+    final savedVolume = prefs.getDouble(volumeKey);
     if (savedVolume != null) await _player.setVolume(savedVolume);
 
     // Recording config (defaults: buffering on, 35 MB, Downloads folder). Clamp
-    // to _recBufferMbMax so an old saved value above the new cap is still bounded.
-    final buffering = prefs.getBool(_recBufferingKey) ?? true;
-    final bufMb = (prefs.getInt(_recBufferMbKey) ?? _recBufferMbDefault)
-        .clamp(5, _recBufferMbMax);
+    // to recBufferMbMax so an old saved value above the new cap is still bounded.
+    final buffering = prefs.getBool(recBufferingKey) ?? true;
+    final bufMb = (prefs.getInt(recBufferMbKey) ?? recBufferMbDefault)
+        .clamp(5, recBufferMbMax);
     _recorder.bufferingEnabled = buffering;
     _recorder.bufferCapBytes = bufMb * 1024 * 1024;
-    final leadSec = prefs.getInt(_recLeadSecondsKey) ?? _recLeadSecondsDefault;
+    final leadSec = prefs.getInt(recLeadSecondsKey) ?? recLeadSecondsDefault;
 
     List<Station>? loadedStations;
-    final savedStations = prefs.getString(_stationsKey);
+    final savedStations = prefs.getString(stationsKey);
     if (savedStations != null) {
       try {
         loadedStations = (jsonDecode(savedStations) as List)
@@ -528,13 +398,13 @@ class _PlayerPageState extends State<PlayerPage>
   Future<void> _applyRecordingPrefs() async {
     final prefs = _prefs;
     if (prefs == null) return;
-    final buffering = prefs.getBool(_recBufferingKey) ?? true;
-    final bufMb = (prefs.getInt(_recBufferMbKey) ?? _recBufferMbDefault)
-        .clamp(5, _recBufferMbMax);
+    final buffering = prefs.getBool(recBufferingKey) ?? true;
+    final bufMb = (prefs.getInt(recBufferMbKey) ?? recBufferMbDefault)
+        .clamp(5, recBufferMbMax);
     final was = _recBuffering;
     _recorder.bufferingEnabled = buffering;
     _recorder.bufferCapBytes = bufMb * 1024 * 1024;
-    final leadSec = prefs.getInt(_recLeadSecondsKey) ?? _recLeadSecondsDefault;
+    final leadSec = prefs.getInt(recLeadSecondsKey) ?? recLeadSecondsDefault;
     if (mounted) {
       setState(() {
         _recBuffering = buffering;
@@ -564,7 +434,7 @@ class _PlayerPageState extends State<PlayerPage>
 
   Future<void> _saveStations() async {
     await _prefs?.setString(
-      _stationsKey,
+      stationsKey,
       jsonEncode(_stations.map((s) => s.toJson()).toList()),
     );
   }
@@ -903,7 +773,7 @@ class _PlayerPageState extends State<PlayerPage>
       _muted = false;
     });
     await _player.setVolume(value);
-    await _prefs?.setDouble(_volumeKey, value);
+    await _prefs?.setDouble(volumeKey, value);
   }
 
   /// Silence the radio without disconnecting (keeps the stream + metadata alive).
@@ -1181,7 +1051,7 @@ class _PlayerPageState extends State<PlayerPage>
     }
     // Logging can be turned off from the History view. Bail before updating
     // _lastHistoryTitle so re-enabling mid-song still logs the current track.
-    if (!(_prefs?.getBool(_historyLoggingKey) ?? true)) return;
+    if (!(_prefs?.getBool(historyLoggingKey) ?? true)) return;
     _lastHistoryTitle = rawTitle;
     final parts = splitArtistTitle(rawTitle);
     final row = [
@@ -1738,8 +1608,8 @@ class _StationDialogState extends State<_StationDialog> {
               runSpacing: 8,
               children: [
                 _defaultChoice(),
-                for (final c in _colorPresets)
-                  _ColorSwatch(
+                for (final c in colorPresets)
+                  AccentSwatch(
                     color: c,
                     selected: _color?.toARGB32() == c.toARGB32(),
                     onTap: () => setState(() => _color = c),
@@ -2011,10 +1881,10 @@ class _SettingsPage extends StatefulWidget {
 class _SettingsPageState extends State<_SettingsPage> {
   SharedPreferences? _prefs;
   bool _buffering = true;
-  int _bufferMb = _recBufferMbDefault;
-  int _leadSeconds = _recLeadSecondsDefault; // -1 ⇒ whole buffer
+  int _bufferMb = recBufferMbDefault;
+  int _leadSeconds = recLeadSecondsDefault; // -1 ⇒ whole buffer
   String? _dir; // null/empty ⇒ Downloads (desktop) / app folder (mobile)
-  Color _accent = const Color(_defaultAccentValue);
+  Color _accent = const Color(defaultAccentValue);
 
   @override
   void initState() {
@@ -2027,10 +1897,10 @@ class _SettingsPageState extends State<_SettingsPage> {
     if (!mounted) return;
     setState(() {
       _prefs = prefs;
-      _buffering = prefs.getBool(_recBufferingKey) ?? true;
-      _bufferMb = (prefs.getInt(_recBufferMbKey) ?? _recBufferMbDefault)
-          .clamp(5, _recBufferMbMax);
-      _leadSeconds = prefs.getInt(_recLeadSecondsKey) ?? _recLeadSecondsDefault;
+      _buffering = prefs.getBool(recBufferingKey) ?? true;
+      _bufferMb = (prefs.getInt(recBufferMbKey) ?? recBufferMbDefault)
+          .clamp(5, recBufferMbMax);
+      _leadSeconds = prefs.getInt(recLeadSecondsKey) ?? recLeadSecondsDefault;
       _dir = prefs.getString(recDirKey);
       _accent = accentColor.value;
     });
@@ -2045,24 +1915,24 @@ class _SettingsPageState extends State<_SettingsPage> {
   // Persist the choice (on release / swatch tap).
   Future<void> _commitAccent(Color c) async {
     _previewAccent(c);
-    await _prefs?.setInt(_accentColorKey, c.toARGB32());
+    await _prefs?.setInt(accentColorKey, c.toARGB32());
   }
 
   int _chan(double v) => (v * 255).round(); // Color component (0..1) → 0..255
 
   Future<void> _setBuffering(bool v) async {
     setState(() => _buffering = v);
-    await _prefs?.setBool(_recBufferingKey, v);
+    await _prefs?.setBool(recBufferingKey, v);
   }
 
   Future<void> _setBufferMb(int mb) async {
     setState(() => _bufferMb = mb);
-    await _prefs?.setInt(_recBufferMbKey, mb);
+    await _prefs?.setInt(recBufferMbKey, mb);
   }
 
   Future<void> _setLeadSeconds(int sec) async {
     setState(() => _leadSeconds = sec);
-    await _prefs?.setInt(_recLeadSecondsKey, sec);
+    await _prefs?.setInt(recLeadSecondsKey, sec);
   }
 
   /// Human label for a lead-in value (seconds; -1 = whole buffer).
@@ -2142,7 +2012,7 @@ class _SettingsPageState extends State<_SettingsPage> {
   }
 
   /// One tappable accent swatch (selected one shows a check + ring).
-  Widget _swatch(Color c) => _ColorSwatch(
+  Widget _swatch(Color c) => AccentSwatch(
         color: c,
         selected: c.toARGB32() == _accent.toARGB32(),
         onTap: () => _commitAccent(c),
@@ -2187,7 +2057,7 @@ class _SettingsPageState extends State<_SettingsPage> {
           child: Wrap(
             spacing: 10,
             runSpacing: 10,
-            children: [for (final c in _colorPresets) _swatch(c)],
+            children: [for (final c in colorPresets) _swatch(c)],
           ),
         ),
         // Fine control: any color. Channel builders rebuild from the other two.
@@ -2212,10 +2082,10 @@ class _SettingsPageState extends State<_SettingsPage> {
           ),
         ),
         Slider(
-          value: _bufferMb.clamp(5, _recBufferMbMax).toDouble(),
+          value: _bufferMb.clamp(5, recBufferMbMax).toDouble(),
           min: 5,
-          max: _recBufferMbMax.toDouble(),
-          divisions: _recBufferMbMax - 5, // 1 MB steps
+          max: recBufferMbMax.toDouble(),
+          divisions: recBufferMbMax - 5, // 1 MB steps
           label: '$_bufferMb MB',
           onChanged:
               _buffering ? (v) => setState(() => _bufferMb = v.round()) : null,
@@ -2234,19 +2104,19 @@ class _SettingsPageState extends State<_SettingsPage> {
           ),
         ),
         Slider(
-          value: _recLeadOptions
+          value: recLeadOptions
               .indexOf(_leadSeconds)
-              .clamp(0, _recLeadOptions.length - 1)
+              .clamp(0, recLeadOptions.length - 1)
               .toDouble(),
           min: 0,
-          max: (_recLeadOptions.length - 1).toDouble(),
-          divisions: _recLeadOptions.length - 1,
+          max: (recLeadOptions.length - 1).toDouble(),
+          divisions: recLeadOptions.length - 1,
           label: _leadLabel(_leadSeconds),
           onChanged: _buffering
-              ? (v) => setState(() => _leadSeconds = _recLeadOptions[v.round()])
+              ? (v) => setState(() => _leadSeconds = recLeadOptions[v.round()])
               : null,
           onChangeEnd: _buffering
-              ? (v) => _setLeadSeconds(_recLeadOptions[v.round()])
+              ? (v) => _setLeadSeconds(recLeadOptions[v.round()])
               : null,
         ),
         const Divider(),
@@ -2383,15 +2253,15 @@ class _RecordingsPageState extends State<_RecordingsPage>
   Future<void> _init() async {
     final prefs = await SharedPreferences.getInstance();
     final files = await listRecordings();
-    final vol = prefs.getDouble(_volumeKey);
+    final vol = prefs.getDouble(volumeKey);
     if (vol != null) await _player.setVolume(vol);
     if (!mounted) return;
     setState(() {
       _prefs = prefs;
       _files = files;
       if (vol != null) _volume = vol;
-      _neverStops = prefs.getBool(_recNeverStopsKey) ?? false;
-      _randomize = prefs.getBool(_recRandomizeKey) ?? false;
+      _neverStops = prefs.getBool(recNeverStopsKey) ?? false;
+      _randomize = prefs.getBool(recRandomizeKey) ?? false;
     });
   }
 
@@ -2535,18 +2405,18 @@ class _RecordingsPageState extends State<_RecordingsPage>
 
   Future<void> _setNeverStops(bool v) async {
     setState(() => _neverStops = v);
-    await _prefs?.setBool(_recNeverStopsKey, v);
+    await _prefs?.setBool(recNeverStopsKey, v);
   }
 
   Future<void> _setRandomize(bool v) async {
     setState(() => _randomize = v);
-    await _prefs?.setBool(_recRandomizeKey, v);
+    await _prefs?.setBool(recRandomizeKey, v);
   }
 
   Future<void> _setVolume(double v) async {
     setState(() => _volume = v);
     await _player.setVolume(v);
-    await _prefs?.setDouble(_volumeKey, v); // shared with the radio player
+    await _prefs?.setDouble(volumeKey, v); // shared with the radio player
   }
 
   /// Export the list as a two-column `artist,title` CSV (same file-picker flow as
@@ -2926,16 +2796,6 @@ class _RecordingsPageState extends State<_RecordingsPage>
   }
 }
 
-/// One saved track. [timestamp] is kept as the raw ISO-8601 string (which sorts
-/// chronologically as plain text).
-class SavedTrack {
-  SavedTrack(this.timestamp, this.station, this.artist, this.title);
-  final String timestamp;
-  final String station;
-  final String artist;
-  final String title;
-}
-
 /// A dark, sortable, searchable table of tracks read from a CSV file. Used for
 /// both the saved-tracks list and the auto-recorded play history — they differ
 /// only in which file they read and their labels. Tap a row to copy
@@ -3044,7 +2904,7 @@ class _TrackListPageState extends State<_TrackListPage> {
     var logging = true;
     if (widget.isHistory) {
       final prefs = await SharedPreferences.getInstance();
-      logging = prefs.getBool(_historyLoggingKey) ?? true;
+      logging = prefs.getBool(historyLoggingKey) ?? true;
     }
     if (!mounted) return;
     setState(() {
@@ -3058,7 +2918,7 @@ class _TrackListPageState extends State<_TrackListPage> {
   Future<void> _setLogging(bool value) async {
     setState(() => _logging = value);
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool(_historyLoggingKey, value);
+    await prefs.setBool(historyLoggingKey, value);
   }
 
   /// History-only band: how many songs are logged + a switch to pause/resume

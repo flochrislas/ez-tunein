@@ -1,4 +1,4 @@
-import 'package:ez_tunein/main.dart';
+import 'package:ez_tunein/models/station.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
