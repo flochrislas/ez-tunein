@@ -1074,7 +1074,12 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
       final text = _recording
           ? 'Recording: ${_nowPlaying.isEmpty ? 'current song' : _nowPlaying}'
           : (_nowPlaying.isEmpty ? 'Playing' : _nowPlaying);
-      const buttons = [NotificationButton(id: 'stop', text: 'Stop')];
+      // A Mute/Unmute toggle so the user can silence the radio from the lock
+      // screen without opening the app; its label tracks the current state.
+      final buttons = [
+        NotificationButton(id: 'mute', text: _muted ? 'Unmute' : 'Mute'),
+        const NotificationButton(id: 'stop', text: 'Stop'),
+      ];
       if (running) {
         await FlutterForegroundTask.updateService(
           notificationTitle: title,
@@ -1098,9 +1103,14 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   }
 
   /// Handle data relayed from the foreground-service isolate (notification
-  /// button taps). Currently just the Stop button.
+  /// button taps): Stop, or the Mute/Unmute toggle (which then refreshes the
+  /// notification so the button label flips).
   void _onForegroundData(Object data) {
-    if (data == 'stop') unawaited(_stop());
+    if (data == 'stop') {
+      unawaited(_stop());
+    } else if (data == 'mute') {
+      unawaited(_toggleMute().then((_) => _syncPlaybackService()));
+    }
   }
 
   String _baseName(String path) => path.split(Platform.pathSeparator).last;
