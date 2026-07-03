@@ -25,7 +25,12 @@ dependencies:
   share_plus: ^12.0.0
   # Native open/save dialogs for import/export of the radio station list
   file_picker: ^8.1.0
-  flutter_foreground_task: ^9.2.2
+  # True Android media session: rich media notification, lock-screen controls,
+  # Bluetooth/headset/car (AVRCP), and a mediaPlayback foreground service that
+  # keeps playback + the recording/metadata socket alive with the screen off.
+  # Replaces flutter_foreground_task. One AudioHandler drives BOTH players
+  # (radio + recordings) — the reason just_audio_background couldn't be used.
+  audio_service: ^0.18.18
 
 dev_dependencies:
   flutter_test:

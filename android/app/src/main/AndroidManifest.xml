@@ -5,15 +5,18 @@
     <!-- usesCleartextTraffic: some relays (e.g. SwissGroove) are plain HTTP;
          Android blocks cleartext by default since API 28. -->
 
-    <!-- Foreground service used to keep recording alive with the screen off
-         (flutter_foreground_task). The service is started only while a song is
-         being recorded; audio playback is ongoing then, so its type is
-         mediaPlayback. POST_NOTIFICATIONS (Android 13+) is needed for its
-         ongoing status notification. -->
+    <!-- Foreground service (audio_service) that keeps playback + the recording/
+         metadata socket alive with the screen off; type mediaPlayback since audio
+         is playing. POST_NOTIFICATIONS (Android 13+) is needed for its media
+         notification. WAKE_LOCK keeps the CPU awake; ACCESS_WIFI_STATE +
+         CHANGE_WIFI_STATE back the native Wi-Fi lock (MainActivity) that keeps the
+         ICY socket flowing under Doze. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE"/>
 
     <application
         android:label="EZ-TuneIn"
@@ -48,12 +51,24 @@
             android:name="flutterEmbedding"
             android:value="2" />
 
-        <!-- flutter_foreground_task's service. Name must not change.
-             foregroundServiceType matches the mediaPlayback permission above. -->
+        <!-- audio_service's MediaSession-backed foreground service + media-button
+             receiver (lock screen, Bluetooth/headset/car AVRCP). Names must not
+             change; foregroundServiceType matches the mediaPlayback permission. -->
         <service
-            android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
+            android:name="com.ryanheise.audioservice.AudioService"
             android:foregroundServiceType="mediaPlayback"
-            android:exported="false" />
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.media.browse.MediaBrowserService" />
+            </intent-filter>
+        </service>
+        <receiver
+            android:name="com.ryanheise.audioservice.MediaButtonReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+        </receiver>
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and

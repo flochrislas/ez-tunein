@@ -105,16 +105,18 @@ Unlike iOS, macOS allows direct download of a `.dmg`/`.app`. **No App Store requ
    subject to review). This is the biggest philosophical shift from Android's APK.
 
 ### The one real code change: background audio
-- `flutter_foreground_task` (background playback + lock-screen controls) is
-  **Android-only**, already guarded by `Platform.isAndroid` — so nothing crashes on
-  iOS, but **iPad gets no background playback / lock-screen controls** without new code.
-- iOS uses `AVAudioSession` "audio" background mode + `MPNowPlayingInfoCenter` /
-  remote-command-center. The standard Flutter bridge is the **`audio_service`** package.
-- **The catch:** `just_audio_background` was deliberately avoided because it allows only
-  one `AudioPlayer` app-wide, and `_RecordingsPage` owns a second player.
-  `audio_service` supports multiple players better, but wiring two players + the
-  separate `IcyReader` recording socket into an iOS background session is the **bulk of
-  the effort** (~2–4 days).
+- The app already uses **`audio_service`** for the media session (rich notification,
+  lock-screen, Bluetooth), and `AudioService.init` is called on **both Android and
+  iOS** (`Platform.isAndroid || Platform.isIOS`) — so the Dart side is already wired
+  for iOS. `EzAudioHandler` drives both the radio and recordings players behind one
+  session (`just_audio_background` was avoided precisely because it allows only one
+  `AudioPlayer` app-wide, and `_RecordingsPage` owns a second player).
+- What's still **Android-only:** the native Wi-Fi lock (`MainActivity.kt`
+  `MethodChannel`) — harmless no-op on iOS (the Dart `WifiLock` guards on
+  `Platform.isAndroid`). iOS would instead need the `AVAudioSession` "audio"
+  background mode declared in `Info.plist` (`UIBackgroundModes`), which doesn't exist
+  yet (no `ios/` folder). Remaining iOS effort is mostly scaffolding + testing, not a
+  rewrite (~1–2 days).
 - **Background *recording* reliability is a question mark.** The "audio" background mode
   keeps *playback* alive, but the `IcyReader` metadata/recording socket loop on the main
   isolate may still get throttled with the screen off — the iOS version of the Android

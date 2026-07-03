@@ -3,17 +3,19 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
+import 'package:audio_service/audio_service.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_media_kit/just_audio_media_kit.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 
+import 'audio_handler.dart';
 import 'csv_utils.dart';
 import 'icy_reader.dart';
 import 'radio_browser.dart';
@@ -59,6 +61,12 @@ const _recLeadOptions = [0, 30, 60, 120, 180, 240, -1];
 const _recNeverStopsKey = 'rec_never_stops'; // auto-play the next file at end
 const _recRandomizeKey = 'rec_randomize'; // pick the next file at random
 
+/// The app's single media-session handler. It owns the Android MediaSession
+/// (rich notification, lock-screen, Bluetooth/car controls) and routes transport
+/// to whichever page is currently driving audio. On mobile it's created via
+/// `AudioService.init`; on desktop it's plain-constructed (no native session).
+late EzAudioHandler audioHandler;
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   // Register the libmpv-based backend for desktop. On Android/iOS this is a
@@ -69,36 +77,35 @@ void main() async {
     macOS: true,
   );
 
-  // Android: configure the foreground service that runs while audio plays. It
-  // holds the app process in the foreground so the OS won't freeze it with the
-  // screen off — keeping both playback and the recording/metadata socket loop
-  // alive — and shows a notification with a Stop button (see _syncPlayback
-  // Service). Pure-Dart config only here; the service starts on demand.
-  if (Platform.isAndroid) {
-    FlutterForegroundTask.initCommunicationPort();
-    FlutterForegroundTask.init(
-      androidNotificationOptions: AndroidNotificationOptions(
-        channelId: 'ez_tunein_playback',
-        channelName: 'Playback',
-        channelDescription: 'Shown while EZ-TuneIn is playing or recording.',
-        // Silent + low-key: it's a status indicator, not an alert.
-        onlyAlertOnce: true,
-      ),
-      iosNotificationOptions: const IOSNotificationOptions(),
-      foregroundTaskOptions: ForegroundTaskOptions(
-        // No periodic task isolate — the handler only relays Stop-button taps
-        // (see _foregroundTaskCallback); the service exists to hold the process
-        // in the foreground so playback + the metadata loop survive the screen
-        // turning off.
-        eventAction: ForegroundTaskEventAction.nothing(),
-        // Keep the CPU and Wi-Fi radio awake so the stream keeps flowing.
-        allowWakeLock: true,
-        allowWifiLock: true,
-        // If the user swipes the app away, stop everything rather than linger.
-        stopWithTask: true,
+  // Set up the media session. On Android/iOS AudioService.init binds the native
+  // MediaSession + mediaPlayback foreground service (keeps playback + the
+  // recording/metadata socket alive with the screen off, and exposes lock-screen
+  // / Bluetooth / car controls). On desktop we construct the same handler
+  // directly — no native session — so playback and the exit(0) close path are
+  // unaffected.
+  if (Platform.isAndroid || Platform.isIOS) {
+    audioHandler = await AudioService.init(
+      builder: () => EzAudioHandler(),
+      config: const AudioServiceConfig(
+        androidNotificationChannelId: 'io.github.flochrislas.eztunein.audio',
+        androidNotificationChannelName: 'Playback',
+        // Keep the foreground service alive when paused so a paused radio stream
+        // still records in the background; ongoing must be false to satisfy
+        // audio_service's assertion (ongoing ⇒ stopForegroundOnPause).
+        androidStopForegroundOnPause: false,
+        androidNotificationOngoing: false,
+        // A monochrome small status icon (the multicolour launcher would render
+        // as a white square in the status bar).
+        androidNotificationIcon: 'drawable/ic_stat_media',
       ),
     );
+  } else {
+    audioHandler = EzAudioHandler();
   }
+
+  // Materialise the bundled app icon to a cache file once, for a consistent
+  // media-card artwork across both radio and recordings modes.
+  await _prepareArtUri();
 
   // Restore the saved accent color before the first frame.
   final prefs = await SharedPreferences.getInstance();
@@ -126,34 +133,20 @@ void main() async {
   runApp(const RadioApp());
 }
 
-/// Entry point for the foreground-service task isolate (Android). It runs in a
-/// separate isolate, so it can't touch the player directly — it only relays
-/// notification-button taps back to the UI isolate via [sendDataToMain], where
-/// [_PlayerPageState._onForegroundData] acts on them. Must be top-level and
-/// annotated so it survives tree-shaking / AOT compilation.
-@pragma('vm:entry-point')
-void _foregroundTaskCallback() {
-  FlutterForegroundTask.setTaskHandler(_PlaybackServiceHandler());
-}
-
-class _PlaybackServiceHandler extends TaskHandler {
-  @override
-  Future<void> onStart(DateTime timestamp, TaskStarter starter) async {}
-
-  // Unused: eventAction is .nothing(), so this never fires.
-  @override
-  void onRepeatEvent(DateTime timestamp) {}
-
-  @override
-  Future<void> onDestroy(DateTime timestamp, bool isTimeout) async {}
-
-  @override
-  void onNotificationButtonPressed(String id) =>
-      FlutterForegroundTask.sendDataToMain(id);
-
-  // Tapping the notification body brings the app back to the front.
-  @override
-  void onNotificationPressed() => FlutterForegroundTask.launchApp();
+/// Copy the bundled launcher icon to a real file once and hand its `file://` URI
+/// to the media handler as the notification/lock-screen artwork. audio_service
+/// needs a loadable bitmap (file/http/content), not an `asset:` path. Best-effort
+/// — if it fails the card simply shows no art.
+Future<void> _prepareArtUri() async {
+  try {
+    final dir = await getApplicationSupportDirectory();
+    final f = File('${dir.path}/media_art.png');
+    if (!await f.exists()) {
+      final data = await rootBundle.load('assets/icon/app_icon_256.png');
+      await f.writeAsBytes(data.buffer.asUint8List());
+    }
+    audioHandler.setArtUri(f.uri);
+  } catch (_) {}
 }
 
 /// A radio station: a display name, an Icecast/Shoutcast stream URL, and an
@@ -406,7 +399,9 @@ class PlayerPage extends StatefulWidget {
   State<PlayerPage> createState() => _PlayerPageState();
 }
 
-class _PlayerPageState extends State<PlayerPage> with WindowListener {
+class _PlayerPageState extends State<PlayerPage>
+    with WindowListener
+    implements AudioModeDriver {
   final _player = AudioPlayer();
   final _icy = IcyReader();
   Timer? _resizeDebounce;
@@ -416,6 +411,9 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   SharedPreferences? _prefs;
   List<Station> _stations = List.of(_defaultStations);
   Station? _current;
+  // True while the stream is paused from the media session/Bluetooth: audio is
+  // stopped but the metadata/recording socket stays alive (non-destructive).
+  bool _paused = false;
   bool _loading = false;
   String _nowPlaying = ''; // raw "Artist - Title" string from the stream
   // State of the ICY metadata side-channel; drives the now-playing message when
@@ -468,12 +466,8 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
       unawaited(windowManager.setPreventClose(true));
     }
     // ICY callbacks are wired per-station in _play (with a session guard); see
-    // there. Just the output-folder resolver and the service hook here.
+    // there. Just the output-folder resolver here.
     _recorder.outputDirResolver = _resolveOutputDir;
-    // Receive notification-button taps relayed from the foreground service.
-    if (Platform.isAndroid) {
-      FlutterForegroundTask.addTaskDataCallback(_onForegroundData);
-    }
     _restorePrefs();
   }
 
@@ -558,7 +552,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
             _manualRecording = false;
           });
         }
-        unawaited(_syncPlaybackService()); // clear "recording" from the notif
+        _publishRadio(); // clear "recording" from the card
       }
       // A title-less station only streams its (second) audio connection when
       // buffering is on, so restart the reader to match the new flag.
@@ -756,10 +750,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     _player.dispose();
     _icy.stop();
     _recorder.dispose();
-    if (Platform.isAndroid) {
-      FlutterForegroundTask.removeTaskDataCallback(_onForegroundData);
-      unawaited(FlutterForegroundTask.stopService());
-    }
+    audioHandler.detach(this);
     super.dispose();
   }
 
@@ -813,6 +804,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     final session = ++_playSession;
     setState(() {
       _current = station;
+      _paused = false;
       _loading = true;
       _nowPlaying = '';
       _trackInfoFresh = false;
@@ -857,7 +849,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
         _manualRecording = false;
       });
       _snack('Could not play ${station.name}: $e');
-      unawaited(_syncPlaybackService()); // _current == null ⇒ tears it down
+      audioHandler.detach(this); // no station on ⇒ tear the session down
       return;
     }
     if (session != _playSession || !mounted) return; // superseded
@@ -868,8 +860,8 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     await _recorder.startBuffering();
     if (session != _playSession) return;
     _startIcy(station, session);
-    // Raise (or refresh) the playback foreground service for this station.
-    unawaited(_syncPlaybackService());
+    // Raise (or refresh) the media session / notification for this station.
+    _publishRadio();
   }
 
   /// Open the metadata/audio reader for [station], tagging its callbacks with
@@ -931,6 +923,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     if (_muted) await _player.setVolume(_volume);
     setState(() {
       _current = null;
+      _paused = false;
       _nowPlaying = '';
       _trackInfoFresh = false;
       _metaStatus = MetadataStatus.idle;
@@ -940,9 +933,29 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
       _manualRecording = false;
       _muted = false;
     });
-    // _current is now null, so this tears the service down.
-    unawaited(_syncPlaybackService());
+    // Nothing playing now ⇒ tear the media session down.
+    audioHandler.detach(this);
     if (saved != null) _snack('Saved recording: ${_baseName(saved)}');
+  }
+
+  /// Non-destructive pause for live radio, from the media session / Bluetooth /
+  /// car. Silences the speaker (stops ExoPlayer) but keeps the ICY metadata +
+  /// recording socket running, so an in-progress recording is NOT interrupted and
+  /// still auto-finalizes on the next track. Play (driverPlay) resumes to live.
+  Future<void> _pauseRadio() async {
+    if (_current == null || _paused) return;
+    await _player.pause();
+    setState(() => _paused = true);
+    _publishRadio();
+  }
+
+  /// Resume after [_pauseRadio]: ExoPlayer restarts from the live edge. The
+  /// metadata/recording socket never stopped, so nothing else needs restarting.
+  Future<void> _resumeRadio() async {
+    if (_current == null || !_paused) return;
+    unawaited(_player.play()); // never await an endless stream (see _play)
+    setState(() => _paused = false);
+    _publishRadio();
   }
 
   /// React to a genuine track change (the ICY reader re-emits the same title each
@@ -954,8 +967,8 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     final isFirst = _lastRecTitle.isEmpty;
     _lastRecTitle = title;
     if (isFirst) {
-      // Reflect the first real title in the playback notification.
-      unawaited(_syncPlaybackService());
+      // Reflect the first real title in the media card.
+      _publishRadio();
       return;
     }
     final saved = await _recorder.onTrackChanged();
@@ -969,8 +982,8 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
       _recording = false;
       _manualRecording = false;
     }
-    // Refresh the notification text for the new track / cleared recording state.
-    unawaited(_syncPlaybackService());
+    // Refresh the card for the new track / cleared recording state.
+    _publishRadio();
   }
 
   /// Whether recording can be *started* now: buffering on, a station playing,
@@ -990,7 +1003,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
       } else {
         _recorder.cancel();
         setState(() => _recording = false);
-        unawaited(_syncPlaybackService()); // notification back to "playing"
+        _publishRadio(); // card back to "playing"
         _snack('Recording cancelled.');
       }
       return;
@@ -1022,8 +1035,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
       _recording = true;
       _manualRecording = manual;
     });
-    unawaited(
-        _syncPlaybackService()); // reflect "recording" in the notification
+    _publishRadio(); // reflect "recording" in the card
     _snack(manual
         ? 'Recording… tap again to save.'
         : 'Recording… it saves automatically when the track changes.');
@@ -1038,7 +1050,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
         _manualRecording = false;
       });
     }
-    unawaited(_syncPlaybackService());
+    _publishRadio();
     if (saved != null) {
       _snack('Saved recording: ${_baseName(saved)}');
     } else {
@@ -1054,64 +1066,49 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
         '${two(n.hour)}.${two(n.minute)}';
   }
 
-  /// Keep the Android playback foreground service in sync with the current
-  /// state. While a station is active the service holds the app process in the
-  /// foreground so the OS won't freeze it with the screen off (keeping both
-  /// playback and the recording/metadata socket loop alive), and shows a
-  /// notification — with a Stop button — reflecting what's playing/recording.
-  /// When nothing is active the service is torn down. No-op off Android;
-  /// best-effort (a failure here never breaks playback or recording).
-  Future<void> _syncPlaybackService() async {
-    if (!Platform.isAndroid) return;
-    try {
-      final running = await FlutterForegroundTask.isRunningService;
-      // Nothing playing ⇒ no service.
-      if (_current == null) {
-        if (running) await FlutterForegroundTask.stopService();
-        return;
-      }
-      final title = _current!.name;
-      final text = _recording
-          ? 'Recording: ${_nowPlaying.isEmpty ? 'current song' : _nowPlaying}'
-          : (_nowPlaying.isEmpty ? 'Playing' : _nowPlaying);
-      // A Mute/Unmute toggle so the user can silence the radio from the lock
-      // screen without opening the app; its label tracks the current state.
-      final buttons = [
-        NotificationButton(id: 'mute', text: _muted ? 'Unmute' : 'Mute'),
-        const NotificationButton(id: 'stop', text: 'Stop'),
-      ];
-      if (running) {
-        await FlutterForegroundTask.updateService(
-          notificationTitle: title,
-          notificationText: text,
-          notificationButtons: buttons,
-        );
-      } else {
-        final perm = await FlutterForegroundTask.checkNotificationPermission();
-        if (perm != NotificationPermission.granted) {
-          await FlutterForegroundTask.requestNotificationPermission();
-        }
-        await FlutterForegroundTask.startService(
-          serviceTypes: const [ForegroundServiceTypes.mediaPlayback],
-          notificationTitle: title,
-          notificationText: text,
-          notificationButtons: buttons,
-          callback: _foregroundTaskCallback,
-        );
-      }
-    } catch (_) {}
+  /// Publish the current radio state to the media session (rich notification +
+  /// lock screen + Bluetooth/car). While a station is active it also holds the
+  /// process in the foreground so playback + the recording/metadata socket
+  /// survive the screen turning off. When nothing is active it tears the session
+  /// down. No-op off mobile; best-effort (never breaks playback/recording).
+  void _publishRadio() {
+    if (!(Platform.isAndroid || Platform.isIOS)) return;
+    if (_current == null) {
+      audioHandler.detach(this);
+      return;
+    }
+    audioHandler.attach(PlaybackMode.radio, this);
+    audioHandler.publishRadio(
+      stationName: _current!.name,
+      nowPlaying: _nowPlaying,
+      playing: !_paused,
+      recording: _recording,
+    );
   }
 
-  /// Handle data relayed from the foreground-service isolate (notification
-  /// button taps): Stop, or the Mute/Unmute toggle (which then refreshes the
-  /// notification so the button label flips).
-  void _onForegroundData(Object data) {
-    if (data == 'stop') {
-      unawaited(_stop());
-    } else if (data == 'mute') {
-      unawaited(_toggleMute().then((_) => _syncPlaybackService()));
-    }
+  // --- AudioModeDriver: transport from the media session / Bluetooth / car ---
+
+  @override
+  Future<void> driverPlay() async {
+    // driverPlay only fires while this page is the active driver, which means a
+    // station is loaded (playing or paused). So the only meaningful action is
+    // resuming from a pause; a full Stop detaches the session entirely (there's
+    // no lingering notification to Play from — the user restarts from the app).
+    if (_paused) await _resumeRadio();
   }
+
+  @override
+  Future<void> driverPause() => _pauseRadio();
+
+  @override
+  Future<void> driverStop() => _stop();
+
+  // Live radio has no seek/skip.
+  @override
+  Future<void> driverSeek(Duration position) async {}
+
+  @override
+  Future<void> driverSkipNext() async {}
 
   String _baseName(String path) => path.split(Platform.pathSeparator).last;
 
@@ -2318,10 +2315,13 @@ class _RecordingsPage extends StatefulWidget {
   State<_RecordingsPage> createState() => _RecordingsPageState();
 }
 
-class _RecordingsPageState extends State<_RecordingsPage> {
+class _RecordingsPageState extends State<_RecordingsPage>
+    implements AudioModeDriver {
   final _player = AudioPlayer();
   StreamSubscription<PlayerState>? _stateSub;
   StreamSubscription<Duration?>? _durSub;
+  StreamSubscription<Duration>? _posSub;
+  int _lastPushedSec = -1; // throttle lock-screen position pushes to ~1/sec
   SharedPreferences? _prefs;
 
   List<File> _files = [];
@@ -2340,17 +2340,13 @@ class _RecordingsPageState extends State<_RecordingsPage> {
   void initState() {
     super.initState();
     _init();
-    // Receive notification-button taps relayed from the foreground service.
-    if (Platform.isAndroid) {
-      FlutterForegroundTask.addTaskDataCallback(_onForegroundData);
-    }
     _stateSub = _player.playerStateStream.listen((s) {
       if (!mounted) return;
       final ps = s.processingState;
       // "Playing" is false once a track completes (the icon should read play).
       setState(() => _isPlaying = s.playing && ps != ProcessingState.completed);
-      // Keep the lock-screen notification (play/pause label, etc.) in step.
-      unawaited(_syncRecordingsService());
+      // Keep the media card (play/pause label, etc.) in step.
+      _publishRecording();
       // Local files are finite, so completed fires at the end → auto-advance.
       // Only on the *transition* into completed (it can re-emit), and deferred
       // off this callback: driving the player from inside its own event leaves
@@ -2367,6 +2363,20 @@ class _RecordingsPageState extends State<_RecordingsPage> {
     // it arrives here instead.
     _durSub = _player.durationStream.listen((d) {
       if (mounted) setState(() => _duration = d);
+    });
+    // Feed the lock-screen scrubber. positionStream ticks often, so push only
+    // when the whole-second changes (best-effort, mobile-only).
+    _posSub = _player.positionStream.listen((pos) {
+      if (!(Platform.isAndroid || Platform.isIOS)) return;
+      if (audioHandler.mode != PlaybackMode.recordings) return;
+      final sec = pos.inSeconds;
+      if (sec == _lastPushedSec) return;
+      _lastPushedSec = sec;
+      audioHandler.updateRecordingPosition(
+        position: pos,
+        buffered: _player.bufferedPosition,
+        playing: _player.playing,
+      );
     });
   }
 
@@ -2389,12 +2399,10 @@ class _RecordingsPageState extends State<_RecordingsPage> {
   void dispose() {
     _stateSub?.cancel();
     _durSub?.cancel();
+    _posSub?.cancel();
     _player.dispose(); // stops playback when leaving the view
-    // Leaving the view stops playback, so drop the foreground service too.
-    if (Platform.isAndroid) {
-      FlutterForegroundTask.removeTaskDataCallback(_onForegroundData);
-      unawaited(FlutterForegroundTask.stopService());
-    }
+    // Leaving the view stops playback, so drop the media session too.
+    audioHandler.detach(this);
     super.dispose();
   }
 
@@ -2438,7 +2446,8 @@ class _RecordingsPageState extends State<_RecordingsPage> {
           _seekDragMs = null;
         });
       }
-      unawaited(_syncRecordingsService()); // reflect the new track in the notif
+      _lastPushedSec = -1; // new track ⇒ allow an immediate position push
+      _publishRecording(); // reflect the new track in the card
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -2474,7 +2483,7 @@ class _RecordingsPageState extends State<_RecordingsPage> {
   }
 
   /// Stop playback entirely (the lock-screen Stop button). Clears the now-playing
-  /// row, which also tears the foreground service down via [_syncRecordingsService].
+  /// row, which also tears the media session down via [_publishRecording].
   Future<void> _stopPlayback() async {
     await _player.stop();
     if (mounted) {
@@ -2485,65 +2494,44 @@ class _RecordingsPageState extends State<_RecordingsPage> {
         _isPlaying = false;
       });
     }
-    unawaited(_syncRecordingsService());
+    _publishRecording();
   }
 
-  /// Handle notification-button taps relayed from the foreground-service isolate.
-  /// IDs are prefixed `rec_` so the radio player's handler ignores them (both
-  /// pages keep a callback registered while the recordings view is on top).
-  void _onForegroundData(Object data) {
-    switch (data) {
-      case 'rec_toggle':
-        _togglePlayPause();
-      case 'rec_skip':
-        _skip();
-      case 'rec_stop':
-        unawaited(_stopPlayback());
+  /// Publish recordings-playback state to the media session: while a file is
+  /// loaded it shows a rich notification (current track + Play/Pause + Skip +
+  /// Stop + scrubber) and holds the process in the foreground so playback
+  /// survives the screen turning off; with nothing loaded it tears the session
+  /// down. No-op off mobile; best-effort.
+  void _publishRecording() {
+    if (!(Platform.isAndroid || Platform.isIOS)) return;
+    if (_index < 0 || _index >= _files.length) {
+      audioHandler.detach(this);
+      return;
     }
+    audioHandler.attach(PlaybackMode.recordings, this);
+    audioHandler.publishRecording(
+      label: _label(_files[_index]),
+      duration: _duration,
+      playing: _isPlaying,
+    );
   }
 
-  /// Keep the Android playback foreground service in step with recordings
-  /// playback: while a file is loaded it shows a notification (current track,
-  /// Pause/Play + Skip + Stop buttons) and holds the process in the foreground so
-  /// playback survives the screen turning off; with nothing loaded it's stopped.
-  /// No-op off Android; best-effort.
-  Future<void> _syncRecordingsService() async {
-    if (!Platform.isAndroid) return;
-    try {
-      final running = await FlutterForegroundTask.isRunningService;
-      if (_index < 0 || _index >= _files.length) {
-        if (running) await FlutterForegroundTask.stopService();
-        return;
-      }
-      final buttons = [
-        NotificationButton(
-            id: 'rec_toggle', text: _isPlaying ? 'Pause' : 'Play'),
-        const NotificationButton(id: 'rec_skip', text: 'Skip'),
-        const NotificationButton(id: 'rec_stop', text: 'Stop'),
-      ];
-      final title = _label(_files[_index]);
-      final text = _isPlaying ? 'Playing' : 'Paused';
-      if (running) {
-        await FlutterForegroundTask.updateService(
-          notificationTitle: title,
-          notificationText: text,
-          notificationButtons: buttons,
-        );
-      } else {
-        final perm = await FlutterForegroundTask.checkNotificationPermission();
-        if (perm != NotificationPermission.granted) {
-          await FlutterForegroundTask.requestNotificationPermission();
-        }
-        await FlutterForegroundTask.startService(
-          serviceTypes: const [ForegroundServiceTypes.mediaPlayback],
-          notificationTitle: title,
-          notificationText: text,
-          notificationButtons: buttons,
-          callback: _foregroundTaskCallback,
-        );
-      }
-    } catch (_) {}
-  }
+  // --- AudioModeDriver: transport from the media session / Bluetooth / car ---
+
+  @override
+  Future<void> driverPlay() async => unawaited(_player.play());
+
+  @override
+  Future<void> driverPause() async => _player.pause();
+
+  @override
+  Future<void> driverStop() => _stopPlayback();
+
+  @override
+  Future<void> driverSeek(Duration position) => _player.seek(position);
+
+  @override
+  Future<void> driverSkipNext() async => _skip();
 
   Future<void> _setNeverStops(bool v) async {
     setState(() => _neverStops = v);

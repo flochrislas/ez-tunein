@@ -133,33 +133,44 @@ backgrounded, Android's **Doze / App-Standby** freezes that isolate — playback
 recording's track-change never fires (it finalizes late, or as one big file, when
 you wake the screen).
 
-The fix is a **foreground service** (`flutter_foreground_task`) that runs the whole
-time a station is playing:
+The fix is **`audio_service`** — a true Android `MediaSession` (0.18.x wraps
+`MediaSessionCompat`/`NotificationCompat`, not Media3) — which runs a
+`mediaPlayback` **foreground service** the whole time audio is playing:
 
-- `_syncPlaybackService` starts a `mediaPlayback` service (silent ongoing
-  notification, wake-lock + Wi-Fi-lock) when you start a station, refreshes its
-  text on track/recording changes, and stops it when you Stop. The foreground
-  priority exempts the process from Doze, so **playback keeps going** and the
-  recording loop still detects the next track with the screen off.
-- The notification carries a **Stop** button (live radio has no useful pause).
-  Taps are received in a background task-handler isolate
-  (`_PlaybackServiceHandler.onNotificationButtonPressed`) and relayed to the UI
-  isolate via `sendDataToMain`, where `_onForegroundData` calls `_stop`. Tapping
-  the notification body re-opens the app.
-- It's **Android-only** (`Platform.isAndroid`) and best-effort — if it can't start
-  (e.g. notifications denied), playback/recording still work while foregrounded.
+- A single `EzAudioHandler` (`lib/audio_handler.dart`) owns the session and
+  **delegates** transport to whichever page is driving audio (an `AudioModeDriver`;
+  the radio player and the recordings library each implement it). Pages publish
+  `mediaItem` + `playbackState` via `attach`/`publishRadio`/`publishRecording` and
+  clear it with `detach` (guarded so a late detach can't wipe the other page's
+  session). The foreground priority exempts the process from Doze, so **playback
+  keeps going** and the recording loop still detects the next track screen-off.
+- The notification is a **rich media card** (album art + track) with lock-screen +
+  **Bluetooth/headset/car (AVRCP)** controls. Radio shows **Play/Pause + Stop**
+  (pause is non-destructive — it only silences the speaker; the metadata/recording
+  socket keeps running, so a stray Bluetooth pause never kills a recording).
+  Recordings show **Play/Pause + Skip + Stop** + a working scrubber.
+- **Swipe-away saves:** `EzAudioHandler.onTaskRemoved` stops through the active
+  driver (the handler is on the main isolate, so the recorder is reachable),
+  finalizing an in-progress recording before the process dies.
+- **Native Wi-Fi lock:** `audio_service` holds a wake lock but not a Wi-Fi lock,
+  and the ICY socket needs the Wi-Fi radio awake under Doze. `MainActivity.kt`
+  exposes a `MethodChannel('ez_tunein/wifi_lock')` (a `WIFI_MODE_FULL_HIGH_PERF`
+  lock) that the handler acquires/releases with playback.
+- **Mobile-only** — on desktop `main()` plain-constructs the handler (no
+  `AudioService.init`), so there's no native session and the `exit(0)` close path
+  is untouched. Best-effort: if the session can't start, foreground playback works.
 
 Manifest additions: `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_MEDIA_PLAYBACK`,
-`POST_NOTIFICATIONS`, `WAKE_LOCK`, and the
-`com.pravera.flutter_foreground_task.service.ForegroundService` declaration with
-`android:foregroundServiceType="mediaPlayback"`.
+`POST_NOTIFICATIONS`, `WAKE_LOCK`, `ACCESS_WIFI_STATE`, `CHANGE_WIFI_STATE`, the
+`com.ryanheise.audioservice.AudioService` service (type `mediaPlayback`, with a
+`MediaBrowserService` intent-filter) + `MediaButtonReceiver`, and `MainActivity`
+extends `AudioServiceActivity` (media-button routing).
 
 > We deliberately did **not** use `just_audio_background`: it allows only one
 > `AudioPlayer` in the whole app, which would crash the recordings library (it
-> owns a second player), and would force migrating playback to
-> `AudioSource`/`MediaItem`. A standalone service avoids both. The trade-off is no
-> true `MediaSession` — i.e. no rich media-card UI and no headset/Bluetooth
-> media-button control.
+> owns a second player). `audio_service` has no such limit — one handler drives
+> both players — which is why the migration from the old plain-notification
+> `flutter_foreground_task` service was possible.
 
 This addresses the *background freeze*. It does **not** change the other limitation
 of ICY metadata — some stations announce the next title a few seconds early, so a

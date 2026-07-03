@@ -31,8 +31,11 @@ Runs on **Windows**, **macOS**, **Linux**, and **Android**.
 
 - **Play internet radio** — stream Icecast/Shoutcast stations such as SomaFM's
   Groove Salad, Drone Zone, or SwissGroove. On Android it keeps playing (and
-  recording) with the screen off — a notification shows what's on with a **Stop**
-  button, so you can pocket the phone and let the music run.
+  recording) with the screen off, with a proper **media notification** — album
+  art, the live track, and **Play/Pause + Stop** on the lock screen. It also
+  responds to your **Bluetooth headset, car, or earbuds** (play/pause), so you
+  can pocket the phone and let the music run. Pausing only silences the speaker —
+  any recording in progress keeps going.
 - **Live "now playing"** — see the current artist and track update as the music
   changes. If a station doesn't broadcast track info, the app says so plainly
   instead of leaving you guessing, and it quietly reconnects if the metadata feed
@@ -51,8 +54,8 @@ Runs on **Windows**, **macOS**, **Linux**, and **Android**.
   and **export** the list as a simple `artist,title` CSV. Each song's **⋮** menu lets
   you **delete** it (to free space) or **share/move** it off the device; on desktop a
   **folder** button opens the recordings folder. On Android it keeps playing with the
-  screen off, with **Pause/Play**, **Skip**, and **Stop** on the lock-screen
-  notification.
+  screen off, with a full media notification — **Play/Pause**, **Skip**, **Stop**, and
+  a scrubber on the lock screen, plus **Bluetooth** headset/car control.
 - **Saved tracks view** — browse everything you've saved in a sortable table of
   **date · radio station · artist · title**. Click a column header to sort by it,
   click a row to copy `Artist - Title` to your clipboard, or wipe the list with

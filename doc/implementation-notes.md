@@ -30,9 +30,10 @@ A minimalist internet-radio player:
 - **Track metadata:** a hand-written ICY reader (no package — see below).
 - **Recording:** no codec package — the ICY reader already walks every audio
   byte, so recording just dumps those (already-compressed) bytes to a file. The
-  only recording-related package is `flutter_foreground_task`, used on Android to
-  keep the app un-frozen while recording with the screen off (not for the capture
-  itself). See [Recording](#recording).
+  background side is handled by `audio_service` (a true Android `MediaSession`),
+  used to keep the app un-frozen while playing/recording with the screen off and
+  to expose lock-screen + Bluetooth controls (not for the capture itself). See
+  [Recording](#recording) and [Background playback](#background-playback).
 - **Persistence:** `shared_preferences` (volume, station list, window size,
   accent color, history-logging flag, recording settings) and two plain CSV files
   (saved tracks + play history).
@@ -429,35 +430,45 @@ current track, so "record" just commits the buffer and keeps going.
   and the app backgrounded, Android's Doze/App-Standby freezes that isolate:
   playback dies (after ExoPlayer's buffer coasts a bit) and no new stream bytes
   are parsed, so a recording never stops (it finalizes late, or as one giant file,
-  when you wake the screen). The fix is a **foreground service**
-  (`flutter_foreground_task`) that runs the whole time a station is active —
-  raised in `_play`, torn down in `_stop`. A single method, `_syncPlaybackService`,
-  drives it: when `_current != null` it starts (or `updateService`-refreshes) a
-  `mediaPlayback` service with a silent ongoing notification (wake-lock +
-  Wi-Fi-lock) showing the station, the now-playing title (or "Recording: …" while
-  armed), and a **Stop** button; when `_current` is null it stops the service. It's
-  re-called on track change, record arm/cancel, and the buffering toggle so the
-  notification text tracks state. The foreground priority keeps the main isolate
-  un-frozen, so playback continues and the recording loop still sees the next-track
-  signal with the screen off.
-  - **The Stop button** is the only transport control — live radio has no
-    meaningful pause (you'd just resume to live). Button taps arrive in a separate
-    **task-handler isolate** (`flutter_foreground_task` runs notification callbacks
-    there): the top-level `_foregroundTaskCallback` registers
-    `_PlaybackServiceHandler`, whose `onNotificationButtonPressed` relays the id via
-    `FlutterForegroundTask.sendDataToMain('stop')`. The UI isolate listens with
-    `addTaskDataCallback(_onForegroundData)` (registered in `initState`, removed in
-    `dispose`) and calls `_stop`. Tapping the notification body calls `launchApp()`.
-    Set up once in `main()` with `initCommunicationPort()` + `init(...)`
-    (`ForegroundTaskEventAction.nothing()` — no periodic event; the handler exists
-    only to relay taps).
-  - All of this is **Android-only** (`Platform.isAndroid`) and best-effort —
-    playback and recording still work in the foreground if the service can't start.
-    We use a standalone service rather than `just_audio_background` because that
-    package permits only one `AudioPlayer` in the whole app, which would crash the
-    recordings library's separate player; it also avoids migrating playback to
-    `AudioSource`/`MediaItem`. The trade-off vs. a true `MediaSession`: no rich
-    media-card UI and no headset/Bluetooth media-button control.
+  when you wake the screen). The fix is **`audio_service`** — a true Android
+  `MediaSession` (0.18.x wraps `MediaSessionCompat`/`NotificationCompat`, not
+  Media3) whose `mediaPlayback` **foreground service** runs the whole time audio is
+  active. A single `EzAudioHandler` (`lib/audio_handler.dart`) owns
+  the session and **delegates** to whichever page drives audio via an
+  `AudioModeDriver` interface; the two players + their logic stay in the State
+  classes. The radio page publishes state with `_publishRadio()` (station + title,
+  or "Recording: …" while armed, Play/Pause + Stop controls) and clears it with
+  `detach`; it's re-called on track change, record arm/cancel, and the buffering
+  toggle. The foreground priority (+ wake lock + the native Wi-Fi lock below) keeps
+  the main isolate un-frozen, so playback continues and the recording loop still
+  sees the next-track signal with the screen off.
+  - **Transport is a real MediaSession**, so the notification is a rich media card
+    with album art (a cached `file://` copy of the launcher icon) and lock-screen +
+    **Bluetooth/headset/car (AVRCP)** controls. Taps/media buttons arrive on the
+    handler's `play`/`pause`/`stop`/`seek`/`skipToNext` overrides (main isolate — no
+    separate task isolate) and are forwarded to the active driver. **Radio pause is
+    non-destructive** (`_pauseRadio` pauses only ExoPlayer; the metadata/recording
+    socket keeps running), so a stray Bluetooth pause never ends a recording;
+    `driverPlay` resumes it (`_resumeRadio`). A full **Stop** detaches the session
+    entirely, so there's no Play-after-Stop reconnect (restart from the app).
+    The in-app **Mute** button (volume→0, instant) stays; the card relies on
+    Play/Pause instead of a custom mute action.
+  - **Swipe-away saves:** `EzAudioHandler.onTaskRemoved` stops through the active
+    driver, so an in-progress recording is finalized before the process dies
+    (reachable because the handler runs on the main isolate — unlike the old
+    task-handler isolate, which just dropped it).
+  - **Native Wi-Fi lock:** `audio_service` holds a wake lock but not a Wi-Fi lock,
+    and the ICY socket needs the Wi-Fi radio awake under Doze. `MainActivity.kt`
+    exposes `MethodChannel('ez_tunein/wifi_lock')` (a `WIFI_MODE_FULL_HIGH_PERF`
+    lock) that the handler acquires on `attach` / releases on `detach`.
+  - It's set up once in `main()` via `AudioService.init(...)` **on Android/iOS
+    only** — on desktop the same handler is plain-constructed (no native session),
+    so the `exit(0)` close path is untouched; `_publishRadio`/`_publishRecording`
+    early-return off mobile. Best-effort: playback/recording still work in the
+    foreground if the session can't start. We use `audio_service` rather than
+    `just_audio_background` because the latter permits only one `AudioPlayer` in the
+    whole app, which would crash the recordings library's separate player;
+    `audio_service`'s one-handler-drives-both-players model has no such limit.
   - This does not fix the *other* limitation of metadata-driven boundaries —
     stations that announce the next title early, or the player's buffer lag, can
     still make a cut feel a few seconds early; that's inherent to ICY metadata
@@ -512,18 +523,18 @@ A small local jukebox for the recorded files (`_RecordingsPage`, opened from the
   confirm dialog, and `_shareFile` via `share_plus` on mobile) so files can be
   freed/moved in-app — important on Android, where the folder isn't browsable.
   Deleting the playing track stops it first and fixes up `_index`.
-- **Background playback (Android).** Like the radio, the recordings view gets the
-  foreground-service treatment so playback survives the screen turning off —
-  `_syncRecordingsService` (driven off the player-state stream) raises/updates the
-  `mediaPlayback` service while a file is loaded and stops it when nothing is. Since
-  these are **finite files**, its lock-screen notification has richer controls than
-  the radio's Stop-only: **Pause/Play** (the button label tracks state), **Skip**
-  (next, honouring Randomize), and **Stop**. The buttons use `rec_`-prefixed IDs
-  (`rec_toggle`/`rec_skip`/`rec_stop`) so the radio page's still-registered
-  `_onForegroundData` ignores them; the recordings page registers its own
-  `_onForegroundData` in `initState` and removes it (and stops the service) in
-  `dispose`. The two pages share the single service instance without clashing because
-  the radio is always stopped (`_current == null`) while recordings playback is
+- **Background playback (Android).** Like the radio, the recordings view drives the
+  shared `EzAudioHandler` (as the `recordings` mode) so playback survives the screen
+  turning off — `_publishRecording()` (driven off the player-state stream)
+  `attach`es + publishes while a file is loaded and `detach`es when nothing is or on
+  `dispose`. Since these are **finite files**, its media card has richer controls
+  than the radio's: **Play/Pause** (label tracks state), **Skip** (next, honouring
+  Randomize), **Stop**, and a working **lock-screen scrubber** (a throttled
+  `positionStream`→`updateRecordingPosition`), plus Bluetooth control. The page
+  implements `AudioModeDriver` (`driverPlay/Pause`→`_player.play/pause`,
+  `driverStop`→`_stopPlayback`, `driverSeek`→`_player.seek`, `driverSkipNext`→
+  `_skip`). The single-active-driver `identical` guard in `detach` means the two
+  pages never clash — the radio is always stopped while recordings playback is
   active. Android-only and best-effort, like the radio path.
 
 ### Filtering / type-to-search
