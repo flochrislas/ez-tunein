@@ -1,10 +1,15 @@
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../app_prefs.dart';
 import '../storage_paths.dart';
 import 'color_swatch.dart';
+
+/// The GitHub Releases page — where newer builds are published.
+const _releasesUrl = 'https://github.com/flochrislas/ez-tunein/releases';
 
 /// Settings for the song recorder: buffering on/off, buffer size, and where
 /// recordings are saved. Persists straight to shared_preferences (the player
@@ -23,6 +28,7 @@ class _SettingsPageState extends State<SettingsPage> {
   int _leadSeconds = recLeadSecondsDefault; // -1 ⇒ whole buffer
   String? _dir; // null/empty ⇒ Downloads (desktop) / app folder (mobile)
   Color _accent = const Color(defaultAccentValue);
+  String _version = ''; // app version string, e.g. "0.9.3" (from the bundle)
 
   @override
   void initState() {
@@ -32,6 +38,7 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Future<void> _load() async {
     final prefs = await SharedPreferences.getInstance();
+    final info = await PackageInfo.fromPlatform();
     if (!mounted) return;
     setState(() {
       _prefs = prefs;
@@ -41,7 +48,22 @@ class _SettingsPageState extends State<SettingsPage> {
       _leadSeconds = prefs.getInt(recLeadSecondsKey) ?? recLeadSecondsDefault;
       _dir = prefs.getString(recDirKey);
       _accent = accentColor.value;
+      _version = info.version;
     });
+  }
+
+  /// Open the GitHub Releases page in the browser (best-effort).
+  Future<void> _openReleases() async {
+    try {
+      await launchUrl(Uri.parse(_releasesUrl),
+          mode: LaunchMode.externalApplication);
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not open the browser.')),
+        );
+      }
+    }
   }
 
   // Re-theme the whole app live as the user drags, without hammering prefs.
@@ -303,7 +325,37 @@ class _SettingsPageState extends State<SettingsPage> {
             style: TextStyle(color: muted),
           ),
         ),
+        const Divider(),
+        _about(muted),
       ],
+    );
+  }
+
+  /// Bottom "about" band: the installed version + a pointer to GitHub Releases
+  /// (this app self-updates only by sideloading a newer build).
+  Widget _about(Color muted) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+      child: Column(
+        children: [
+          Text(
+            _version.isEmpty ? 'EZ-TuneIn' : 'EZ-TuneIn  v$_version',
+            style: TextStyle(color: muted, fontWeight: FontWeight.w500),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'A newer release may be available on GitHub.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: muted),
+          ),
+          const SizedBox(height: 4),
+          TextButton.icon(
+            onPressed: _openReleases,
+            icon: const Icon(Icons.open_in_new, size: 18),
+            label: const Text('Releases on GitHub'),
+          ),
+        ],
+      ),
     );
   }
 }
