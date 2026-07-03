@@ -1,7 +1,10 @@
 package io.github.flochrislas.eztunein
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.wifi.WifiManager
+import android.os.Build
 import com.ryanheise.audioservice.AudioServiceActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -10,12 +13,18 @@ import io.flutter.plugin.common.MethodChannel
  * Extends AudioServiceActivity so media-button intents (Bluetooth / headset /
  * car) are routed to the audio_service session.
  *
- * Also exposes a tiny MethodChannel ("ez_tunein/wifi_lock") that holds a
- * WifiManager.WifiLock while audio is playing. audio_service keeps a wake lock
- * and a foreground service, but not a Wi-Fi lock; the app's ICY metadata /
- * recording socket (a separate connection from ExoPlayer) needs the Wi-Fi radio
- * kept awake under Doze to keep feeding the recorder with the screen off. This
- * replaces the Wi-Fi lock flutter_foreground_task used to provide.
+ * Also exposes two tiny MethodChannels:
+ *  - "ez_tunein/wifi_lock" holds a WifiManager.WifiLock while audio is playing.
+ *    audio_service keeps a wake lock and a foreground service, but not a Wi-Fi
+ *    lock; the app's ICY metadata / recording socket (a separate connection from
+ *    ExoPlayer) needs the Wi-Fi radio kept awake under Doze to keep feeding the
+ *    recorder with the screen off. This replaces the Wi-Fi lock
+ *    flutter_foreground_task used to provide.
+ *  - "ez_tunein/notifications" requests the Android 13+ POST_NOTIFICATIONS
+ *    runtime permission. Without it audio_service can't post its foreground-
+ *    service media notification, so no lock-screen/notification controls show
+ *    AND the foreground service can't hold the app awake — playback then dies
+ *    ~20s after the screen turns off.
  */
 class MainActivity : AudioServiceActivity() {
     private var wifiLock: WifiManager.WifiLock? = null
@@ -31,6 +40,28 @@ class MainActivity : AudioServiceActivity() {
                 "release" -> { releaseWifiLock(); result.success(null) }
                 else -> result.notImplemented()
             }
+        }
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "ez_tunein/notifications"
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "requestPermission" -> { requestNotificationPermission(); result.success(null) }
+                else -> result.notImplemented()
+            }
+        }
+    }
+
+    // Fire the OS permission dialog if POST_NOTIFICATIONS isn't already granted
+    // (Android 13 / API 33+ only — it's install-time granted below that). We
+    // don't need the result back in Dart: audio_service re-posts its notification
+    // on the next playbackState change once the user grants it.
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+                PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001)
         }
     }
 

@@ -49,6 +49,12 @@ void main() async {
     audioHandler = EzAudioHandler();
   }
 
+  // Android 13+ needs POST_NOTIFICATIONS granted at runtime, or audio_service
+  // can't show its media notification and the foreground service won't hold the
+  // app awake (playback would die ~20s after screen-off). Ask early so controls
+  // work from the first play. No-op below API 33 / off Android.
+  await NotificationPermission.request();
+
   // Materialise the bundled app icon to a cache file once, for a consistent
   // media-card artwork across both radio and recordings modes.
   await _prepareArtUri();

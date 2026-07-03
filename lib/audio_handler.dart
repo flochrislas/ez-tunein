@@ -47,6 +47,24 @@ class WifiLock {
   }
 }
 
+/// Requests the Android 13+ (`API 33`) `POST_NOTIFICATIONS` runtime permission.
+/// Without it audio_service can't post its foreground-service media notification,
+/// so there are **no** lock-screen / notification / Bluetooth-card controls AND
+/// the foreground service can't keep the app alive — playback dies ~20s after the
+/// screen turns off. Below API 33 the permission is install-time granted, so the
+/// native side no-ops. Best-effort, Android-only. Backed by a MethodChannel in
+/// MainActivity.kt.
+class NotificationPermission {
+  static const _channel = MethodChannel('ez_tunein/notifications');
+
+  static Future<void> request() async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _channel.invokeMethod('requestPermission');
+    } catch (_) {}
+  }
+}
+
 /// The app's single [AudioHandler]. It owns the platform MediaSession (rich media
 /// notification, lock-screen controls, Bluetooth/headset/car AVRCP) but delegates
 /// all actual playback to the active [AudioModeDriver] — this is what lets the app
