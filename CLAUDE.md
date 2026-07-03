@@ -34,9 +34,32 @@ This is a git repo, public on GitHub at **https://github.com/flochrislas/ez-tune
 
 ## Layout
 
-- **`lib/main.dart`** — the UI and the `_PlayerPageState` player/session
-  controller + the other page widgets (recordings, settings, track lists). Still
-  the bulk of the app; keep UI here rather than spreading it across files.
+- **`lib/main.dart`** — bootstrap only: `main()` (media-kit backend + audio
+  session + accent/window restore + `runApp`) and `_prepareArtUri`. ~95 lines.
+- **`lib/app.dart`** — `RadioApp` (the root `MaterialApp`, accent-seeded M3 dark
+  theme, `home: PlayerPage`).
+- **`lib/app_prefs.dart`** — all `SharedPreferences` key constants + recording
+  defaults, plus the two app-level globals `accentColor` (the live-theming
+  `ValueNotifier`) and `audioHandler` (the media-session handler). Import this
+  wherever a pref key/default is needed rather than re-declaring it.
+- **`lib/models/station.dart`** / **`lib/models/saved_track.dart`** — the plain
+  data classes `Station` (with `toJson`/`fromJson`) and `SavedTrack`.
+- **`lib/player/player_page.dart`** — `PlayerPage` + `_PlayerPageState`: the
+  radio player/session controller (playback, ICY metadata, recording lifecycle,
+  window-close handling, media-session publication) + the private
+  `_defaultStations` seed list. The largest UI unit; implements
+  `AudioModeDriver`.
+- **`lib/stations/`** — `station_tile.dart` (`StationTile`),
+  `station_dialog.dart` (`StationDialog`, add/edit), `station_search_page.dart`
+  (`StationSearchPage`, the Radio Browser online search UI).
+- **`lib/settings/`** — `settings_page.dart` (`SettingsPage`) and
+  `color_swatch.dart` (`AccentSwatch` + the shared `colorPresets`, used by both
+  the accent picker and the per-station colour picker).
+- **`lib/recordings/recordings_page.dart`** — `RecordingsPage` + its State (the
+  local recordings jukebox; owns its own `AudioPlayer`, implements
+  `AudioModeDriver`, takes a `stopRadio` callback).
+- **`lib/tracks/track_list_page.dart`** — `TrackListPage` (the shared
+  saved-tracks / play-history sortable table).
 - **`lib/icy_reader.dart`** — `MetadataStatus`, the pure `IcyParser` byte-level
   state machine, and `IcyReader` (its own HTTP connection + reconnect/generation
   lifecycle). The metadata side-channel, deliberately decoupled from playback.
@@ -50,8 +73,8 @@ This is a git repo, public on GitHub at **https://github.com/flochrislas/ez-tune
 - **`lib/radio_browser.dart`** — `RadioBrowserStation` + the pure
   `parseRadioBrowserStations` + `searchRadioBrowser` (its own `dart:io HttpClient`,
   server-fallback list, User-Agent). The online station-search backend, UI-free (the
-  `_StationSearchPage` widget lives in `main.dart`); parser unit-tested in
-  `test/radio_browser_test.dart`.
+  `StationSearchPage` widget lives in `lib/stations/station_search_page.dart`);
+  parser unit-tested in `test/radio_browser_test.dart`.
 - **`lib/csv_utils.dart`** — `parseCsv` / `csvField` (RFC-4180).
 - **`lib/track_utils.dart`** — `splitArtistTitle`, `fmtDateTime`, `fmtDuration`.
 - **`test/`** — unit tests for the non-UI modules above (`IcyParser`, CSV,
@@ -60,9 +83,16 @@ This is a git repo, public on GitHub at **https://github.com/flochrislas/ez-tune
 - `pubspec.yaml` — dependencies.
 - `doc/` — design & implementation docs.
 
-The non-UI logic was extracted from the once-single `main.dart` so the metadata
-parser and recorder are independently testable. Keep new **pure/non-UI** logic in
-the matching module (and add a test); keep **widgets/UI** in `main.dart`.
+`main.dart` was split from a once-single ~3500-line file into the modules above.
+Keep new **pure/non-UI** logic in the matching service module (and add a test),
+and put each **page/widget** in the feature folder that fits (`player/`,
+`stations/`, `settings/`, `recordings/`, `tracks/`, `models/`). **Convention:**
+each page widget class is **public** (e.g. `StationDialog`, `SettingsPage`) so it
+can be referenced across files, while its `State` class stays **private** in the
+same file. Pages communicate through constructor callbacks / returned values, not
+by reaching into each other's state. The service files (`icy_reader.dart`,
+`stream_recorder.dart`, `radio_browser.dart`, etc.) stay flat at the top of
+`lib/`.
 
 ## Toolchain
 
@@ -122,7 +152,7 @@ the binary to confirm runtime behaviour (audio/UI can't be observed here).
 
 ## Conventions & gotchas
 
-- **Match the existing style** in `main.dart`: Material 3, dark theme, `FilledButton`s, terse comments that explain *why*.
+- **Match the existing style** in the page modules (`lib/player/`, `lib/settings/`, …): Material 3, dark theme, `FilledButton`s, terse comments that explain *why*.
 - **Metadata is decoupled from playback on purpose.** `just_audio`'s `icyMetadataStream` does NOT work on Windows/Linux, so the app parses ICY itself in `IcyReader` (`lib/icy_reader.dart`). Do not "simplify" by switching to `icyMetadataStream`. See `doc/implementation-notes.md`. Key lifecycle pieces:
   - **Pure parser** `IcyParser` (byte state machine) is separate from `IcyReader` (HTTP + lifecycle) so the parser is unit-tested (`test/icy_reader_test.dart`).
   - **`IcyReader.start` takes its callbacks as parameters** (`onTitle`/`onAudio`/`onStatus`) — `_play` passes closures. **Don't** restore the old mutable global `onTitle`/`onAudio` fields.

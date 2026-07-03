@@ -44,9 +44,11 @@ A minimalist internet-radio player:
 - **Station list import/export:** `file_picker` (native open/save dialogs on all
   three platforms; on Linux it shells out to `zenity`/`kdialog`).
 
-The UI lives in **`lib/main.dart`**; the non-UI logic (ICY parsing, recording,
-CSV, paths, text helpers) was extracted into small sibling modules so it's
-independently unit-testable. See the [Code map](#code-map).
+The UI is split across feature folders under `lib/` (`player/`, `stations/`,
+`settings/`, `recordings/`, `tracks/`, plus `models/`, `app.dart`,
+`app_prefs.dart`); the non-UI logic (ICY parsing, recording, CSV, paths, text
+helpers) lives in flat sibling modules so it's independently unit-testable.
+`lib/main.dart` is now just the bootstrap. See the [Code map](#code-map).
 
 ## The key design decision: metadata is decoupled from playback
 
@@ -123,13 +125,24 @@ Lifecycle hardening (added after a code review):
 
 ## Code map
 
-The non-UI logic was extracted from the once-single `main.dart` into small,
-independently testable modules; `main.dart` keeps the UI and the player/session
-controller. Modules:
+The once-single ~3500-line `main.dart` was split into small modules: each page
+lives in a feature folder, the data classes in `models/`, shared prefs/globals in
+`app_prefs.dart`, and the non-UI logic stays in flat, independently testable
+sibling files. **Convention:** each page widget class is public (its `State`
+stays private in-file); pages talk through constructor callbacks / returned
+values. Modules:
 
 | File | Owns |
 |---|---|
-| `lib/main.dart` | UI, `_PlayerPageState` (player/session controller), all page widgets. |
+| `lib/main.dart` | Bootstrap only: `main()` + `_prepareArtUri` (~95 lines). |
+| `lib/app.dart` | `RadioApp` (root `MaterialApp`, accent-seeded M3 dark theme). |
+| `lib/app_prefs.dart` | All `SharedPreferences` key consts + rec defaults; the `accentColor` and `audioHandler` app-level globals. |
+| `lib/models/station.dart` / `saved_track.dart` | `Station`, `SavedTrack` data classes. |
+| `lib/player/player_page.dart` | `PlayerPage` / `_PlayerPageState` (player/session controller) + `_defaultStations`. |
+| `lib/stations/` | `StationTile`, `StationDialog`, `StationSearchPage`. |
+| `lib/settings/` | `SettingsPage`; `color_swatch.dart` (`AccentSwatch` + `colorPresets`). |
+| `lib/recordings/recordings_page.dart` | `RecordingsPage` (local recordings jukebox). |
+| `lib/tracks/track_list_page.dart` | `TrackListPage` (shared saved-tracks / history table). |
 | `lib/icy_reader.dart` | `MetadataStatus`, pure `IcyParser`, `IcyReader`. |
 | `lib/stream_recorder.dart` | `StreamRecorder` + filename/extension/unique-path statics. |
 | `lib/storage_paths.dart` | `isDesktop`, `recDirKey`, `recordingsDir`, `savedTracksFile`, `historyFile`, `listRecordings`, `isAudioFile`. |
@@ -147,20 +160,20 @@ Key symbols:
 | `Station` | `{name, url}` value object with `toJson`/`fromJson`. |
 | `_defaultStations` | The seed list used on first launch only (mirrors `radios-selection.csv` at the repo root). |
 | `PlayerPage` / `_PlayerPageState` | The main screen. Owns the `AudioPlayer`, the `IcyReader`, the station list, volume, and (via `WindowListener`) window-resize persistence. `_recordHistory` logs each played song (see [Play history](#play-history)). |
-| `_StationTile` | A station row that reveals its edit + delete buttons only on hover (`MouseRegion`). |
+| `StationTile` | A station row that reveals its edit + delete buttons only on hover (`MouseRegion`). |
 | `_actionTile` | The dimmed/italic list rows for add / import / export at the end of the station list. |
-| `_StationSearchPage` | The online station-search screen (Radio Browser keyword search, multi-select, favicons) opened by "Add a new radio station…"; its pencil action opens the manual `_StationDialog`. See [Online station search](#online-station-search-radio-browser). |
+| `StationSearchPage` | The online station-search screen (Radio Browser keyword search, multi-select, favicons) opened by "Add a new radio station…"; its pencil action opens the manual `StationDialog`. See [Online station search](#online-station-search-radio-browser). |
 | `_searchBar` / `_openSearch` / `_closeSearch` / `_onPageKey` | The type-to-search station filter (see [Filtering](#filtering--type-to-search)). |
 | `_importStations` / `_exportStations` | Import/export the station list as a `name,url` CSV via `file_picker`. |
-| `_StationDialog` | Name + URL + colour-picker dialog; returns a `Station`. Pre-fills from `initial` to edit (vs. add). |
-| `_ColorSwatch` | Reusable round colour chip (accent picker + station colour picker). |
-| `_TrackListPage` / `SavedTrack` | The shared sortable/searchable table screen, used for **both** saved tracks and play history (parameterized by `title` / `fileResolver` / `emptyMessage` / `shareSubject` / `isHistory`). `_export` shares the CSV (share sheet on mobile, reveal-in-folder on desktop); `_historyControls` adds the count + logging toggle when `isHistory`. |
+| `StationDialog` | Name + URL + colour-picker dialog; returns a `Station`. Pre-fills from `initial` to edit (vs. add). |
+| `AccentSwatch` | Reusable round colour chip (accent picker + station colour picker). |
+| `TrackListPage` / `SavedTrack` | The shared sortable/searchable table screen, used for **both** saved tracks and play history (parameterized by `title` / `fileResolver` / `emptyMessage` / `shareSubject` / `isHistory`). `_export` shares the CSV (share sheet on mobile, reveal-in-folder on desktop); `_historyControls` adds the count + logging toggle when `isHistory`. |
 | `IcyParser` | Pure byte-level ICY state machine (no I/O); unit-tested. |
 | `IcyReader` | HTTP + lifecycle wrapper around `IcyParser`: forwards audio bytes via `onAudio`, reports `contentType`/`bitrateKbps` and `MetadataStatus`, and auto-reconnects a dropped metadata socket. |
 | `StreamRecorder` | Buffers the live audio to a temp file and finalizes a recording to `Artist - Title.<ext>` (see [Recording](#recording)). |
-| `_SettingsPage` | The combined Settings screen: appearance (accent color) + recording prefs (buffering, buffer size, lead-in, output folder). |
+| `SettingsPage` | The combined Settings screen: appearance (accent color) + recording prefs (buffering, buffer size, lead-in, output folder). |
 | `accentColor` | Top-level `ValueNotifier<Color>` for the Material 3 seed; `RadioApp` rebuilds `MaterialApp` on change so the accent applies live. |
-| `_RecordingsPage` | The recordings library — lists/plays the files in the output folder with never-stops / randomize / skip / export (see [Recordings library](#recordings-library)). |
+| `RecordingsPage` | The recordings library — lists/plays the files in the output folder with never-stops / randomize / skip / export (see [Recordings library](#recordings-library)). |
 | `recordingsDir()` / `listRecordings()` / `isAudioFile` | Locate the recordings folder (shared by the recorder + library) and list its audio files. |
 | `savedTracksFile()` / `historyFile()` | Resolve the two CSV paths (`radio_saved_tracks.csv` / `radio_history.csv`). |
 | `splitArtistTitle` | Splits a raw ICY `"Artist - Title"` string; shared by save, history, and recording filenames. |
@@ -211,7 +224,7 @@ Key symbols:
   new).
 - **Add/edit/remove stations:** mutate `_stations`, then `_saveStations()` writes
   the JSON. Adding rejects a URL already present (exact-string match). Editing
-  (`_editStation`) reuses `_StationDialog` pre-filled with the station, rejects a
+  (`_editStation`) reuses `StationDialog` pre-filled with the station, rejects a
   URL change that collides with a *different* station, replaces the entry in place
   (preserving order), and — if the edited station was playing — points `_current`
   at the new object so the highlight/label stay in sync (the audio keeps running
@@ -219,7 +232,7 @@ Key symbols:
   station stops playback first.
 - **Per-station colour:** `Station.color` (optional ARGB int) is set in the
   edit/add dialog via a "Default" chip + preset swatches, saved in the `stations`
-  JSON, and used by `_StationTile` to tint the icon + name — for tagging stations
+  JSON, and used by `StationTile` to tint the icon + name — for tagging stations
   by genre or flagging favourites. It's not part of the `name,url` CSV (a local
   visual tag only).
 - **Play history:** see [Play history](#play-history).
@@ -242,7 +255,7 @@ Key symbols:
 
 ### Export / share the CSV
 
-`_export()` (the shared `_TrackListPage`, so both saved tracks and history) is
+`_export()` (the shared `TrackListPage`, so both saved tracks and history) is
 **platform-adaptive**:
 
 - **Mobile (Android/iOS):** hands the CSV to the OS share sheet via `share_plus`
@@ -258,12 +271,12 @@ The action is disabled when the list is empty.
 ### Online station search (Radio Browser)
 
 The **"Add a new radio station…"** row no longer opens the manual dialog
-directly — it pushes **`_StationSearchPage`**, which lets the user search the
+directly — it pushes **`StationSearchPage`**, which lets the user search the
 free, no-key **[Radio Browser](https://www.radio-browser.info) API** by keyword,
 tick one or several results, and add them at once. The page pops a
 `List<Station>` and `_addStation` merges it with the **same `Set.add`
 non-destructive dedup** as import. The app-bar **pencil** on that page opens the
-classic manual `_StationDialog` and pops its single result through the same path,
+classic manual `StationDialog` and pops its single result through the same path,
 so the manual flow still exists.
 
 The network/parse logic lives in **`lib/radio_browser.dart`** (UI-free, so the
@@ -326,7 +339,7 @@ from the **clock** icon in the app bar.
   flipping logging back on mid-song still captures the current track. The History
   page and the player both reach the flag through `shared_preferences`' single
   cached instance, so the toggle takes effect immediately with no extra plumbing.
-- **Shared view (`_TrackListPage`).** History and saved tracks are the *same*
+- **Shared view (`TrackListPage`).** History and saved tracks are the *same*
   widget, differing only by `title` / `fileResolver` / `emptyMessage` /
   `shareSubject` / `isHistory`. Sort, the desktop/compact layouts, type-to-search
   (matching artist/title/station), export, and clear are therefore identical.
@@ -473,7 +486,7 @@ current track, so "record" just commits the buffer and keeps going.
     stations that announce the next title early, or the player's buffer lag, can
     still make a cut feel a few seconds early; that's inherent to ICY metadata
     without decoding the audio.
-- **Settings (`_SettingsPage`).** One combined screen (gear icon on both the
+- **Settings (`SettingsPage`).** One combined screen (gear icon on both the
   player and the recordings view), with **Appearance** first, then recording.
   - **Accent color.** The Material 3 seed lives in a top-level
     `ValueNotifier<Color> accentColor`; `RadioApp` wraps `MaterialApp` in a
@@ -495,7 +508,7 @@ current track, so "record" just commits the buffer and keeps going.
 
 ### Recordings library
 
-A small local jukebox for the recorded files (`_RecordingsPage`, opened from the
+A small local jukebox for the recorded files (`RecordingsPage`, opened from the
 `library_music` app-bar icon).
 
 - **Its own player.** The view creates a **separate** `AudioPlayer` from the radio's
