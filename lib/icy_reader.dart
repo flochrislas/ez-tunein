@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 /// State of the ICY metadata side-channel, surfaced so the UI can tell apart the
 /// cases that all used to read "Waiting for track info…": still connecting, a
@@ -36,16 +37,21 @@ class IcyParser {
 
   void addChunk(List<int> chunk) {
     // Forward contiguous runs of audio bytes (everything that isn't a length
-    // byte or metadata) in batches rather than byte-by-byte.
+    // byte or metadata) in batches rather than byte-by-byte. The run is a
+    // zero-copy view when the chunk is a Uint8List (the socket case); addAudio
+    // consumes it synchronously (writeFromSync), so the view can't outlive the
+    // buffer.
     var audioStart = -1;
     void flushAudio(int end) {
       if (audioStart >= 0) {
-        onAudio?.call(chunk.sublist(audioStart, end));
+        onAudio?.call(chunk is Uint8List
+            ? Uint8List.sublistView(chunk, audioStart, end)
+            : chunk.sublist(audioStart, end));
         audioStart = -1;
       }
     }
 
-    for (var i = 0; i < chunk.length; i++) {
+    for (var i = 0; i < chunk.length;) {
       final b = chunk[i];
       if (_readingLen) {
         flushAudio(i); // the length byte ends the current audio run
@@ -57,6 +63,7 @@ class IcyParser {
           _metaBuf.clear();
           _inMeta = true;
         }
+        i++;
       } else if (_inMeta) {
         _metaBuf.add(b);
         _metaRemaining--;
@@ -65,12 +72,16 @@ class IcyParser {
           _inMeta = false;
           _bytesUntilMeta = metaInt;
         }
+        i++;
       } else {
+        // Audio phase: jump the whole run to the next meta boundary / chunk end
+        // in one step instead of decrementing the counter per byte.
         if (audioStart < 0) audioStart = i;
-        _bytesUntilMeta--;
-        if (_bytesUntilMeta == 0) {
-          _readingLen = true;
-        }
+        final remaining = chunk.length - i;
+        final take = _bytesUntilMeta < remaining ? _bytesUntilMeta : remaining;
+        i += take;
+        _bytesUntilMeta -= take;
+        if (_bytesUntilMeta == 0) _readingLen = true;
       }
     }
     flushAudio(chunk.length); // trailing audio run in this chunk

@@ -713,7 +713,10 @@ class _PlayerPageState extends State<PlayerPage>
         _recordHistory(title);
         _handleTrackChange(title);
       },
-      onAudio: _recorder.addAudio,
+      // No buffering ⇒ no audio sink, so the parser skips copying/forwarding
+      // audio runs entirely (P7). bufferWithoutMetadata is also _recBuffering,
+      // so a title-less station keeps no second connection either — consistent.
+      onAudio: _recBuffering ? _recorder.addAudio : null,
       onStatus: (status) {
         if (session != _playSession || !mounted) return;
         setState(() {
