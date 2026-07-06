@@ -181,6 +181,12 @@ class _PlayerPageState extends State<PlayerPage>
   // stopped but the metadata/recording socket stays alive (non-destructive).
   bool _paused = false;
   bool _loading = false;
+  // True when the radio player has errored (mid-stream drop, decode failure, a
+  // failed play()). Surfaces "Stream lost" instead of the fake "playing" the ICY
+  // auto-reconnect would otherwise mask (C3). Cleared on a fresh _play/_stop.
+  bool _streamError = false;
+  StreamSubscription<PlaybackEvent>?
+      _playbackSub; // radio player error listener
   String _nowPlaying = ''; // raw "Artist - Title" string from the stream
   // State of the ICY metadata side-channel; drives the now-playing message when
   // there's no title yet (connecting / unsupported / failed / waiting).
@@ -236,6 +242,12 @@ class _PlayerPageState extends State<PlayerPage>
     // ICY callbacks are wired per-station in _play (with a session guard); see
     // there. Just the output-folder resolver here.
     _recorder.outputDirResolver = _resolveOutputDir;
+    // Observe the radio player so a mid-stream failure surfaces instead of the
+    // UI (and the auto-reconnecting ICY feed) pretending it's still playing (C3).
+    _playbackSub = _player.playbackEventStream.listen(
+      (_) {},
+      onError: (Object e, StackTrace _) => _onPlayerError(e),
+    );
     _restorePrefs();
   }
 
@@ -541,6 +553,7 @@ class _PlayerPageState extends State<PlayerPage>
     _searchController.dispose();
     _searchFocus.dispose();
     _pageFocus.dispose();
+    _playbackSub?.cancel();
     _player.dispose();
     _icy.stop();
     _recorder.dispose();
@@ -600,6 +613,7 @@ class _PlayerPageState extends State<PlayerPage>
       _current = station;
       _paused = false;
       _loading = true;
+      _streamError = false;
       _nowPlaying = '';
       _trackInfoFresh = false;
       _metaStatus = MetadataStatus.connecting;
@@ -629,7 +643,8 @@ class _PlayerPageState extends State<PlayerPage>
       // awaiting it would block here forever — leaving "Connecting…" stuck and
       // the metadata reader below unreached. (The media_kit desktop backend
       // returned promptly, so this only surfaced on Android/ExoPlayer.)
-      unawaited(_player.play());
+      // catchError so a late play() failure surfaces instead of going unhandled.
+      unawaited(_player.play().catchError((Object e) => _onPlayerError(e)));
     } catch (e) {
       // Playback failed: return to the stopped state instead of looking like
       // we're playing and waiting for track info. Don't start the buffer, the
@@ -741,6 +756,7 @@ class _PlayerPageState extends State<PlayerPage>
       _recording = false;
       _manualRecording = false;
       _muted = false;
+      _streamError = false;
     });
     // Nothing playing now ⇒ tear the media session down.
     audioHandler.detach(this);
@@ -766,9 +782,25 @@ class _PlayerPageState extends State<PlayerPage>
   /// metadata/recording socket never stopped, so nothing else needs restarting.
   Future<void> _resumeRadio() async {
     if (_current == null || !_paused) return;
-    unawaited(_player.play()); // never await an endless stream (see _play)
-    setState(() => _paused = false);
+    // never await an endless stream (see _play); catch a late failure.
+    unawaited(_player.play().catchError((Object e) => _onPlayerError(e)));
+    setState(() {
+      _paused = false;
+      _streamError = false;
+    });
     _publishRadio();
+  }
+
+  /// The radio player errored (mid-stream drop, decode failure, or a failed late
+  /// play()). Surface it instead of the fake "playing" the ICY auto-reconnect
+  /// would otherwise mask. Reconnect is manual — the user re-taps the station.
+  void _onPlayerError(Object e) {
+    if (!mounted || _current == null) return; // already stopped / switching
+    setState(() {
+      _streamError = true;
+      _loading = false;
+    });
+    _snack('Stream lost — tap the station to reconnect.');
   }
 
   /// React to a genuine track change (the ICY reader re-emits the same title each
@@ -971,6 +1003,9 @@ class _PlayerPageState extends State<PlayerPage>
   String _nowPlayingText(bool playing) {
     if (_loading) return 'Connecting…';
     if (!playing) return '—';
+    // A dead player wins over any (auto-reconnecting) ICY title, so lost audio
+    // can't keep masquerading as playing (C3).
+    if (_streamError) return 'Stream lost — tap the station to reconnect.';
     if (_trackInfoFresh && _nowPlaying.isNotEmpty) return _nowPlaying;
     if (_nowPlaying.isNotEmpty && _metaStatus == MetadataStatus.failed) {
       return 'Track info unavailable — last: $_nowPlaying';
