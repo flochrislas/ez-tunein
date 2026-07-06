@@ -206,12 +206,20 @@ class _StationSearchPageState extends State<StationSearchPage> {
   Widget _favicon(RadioBrowserStation r, ColorScheme scheme) {
     final fallback = Icon(Icons.radio, color: scheme.onSurfaceVariant);
     Widget box(Widget child) => SizedBox(width: 40, height: 40, child: child);
-    if (r.favicon.isEmpty) return box(fallback);
+    // Only load favicons over https: a plain-http fetch to an arbitrary
+    // directory-listed host leaks the user's IP merely by searching (S10).
+    final uri = Uri.tryParse(r.favicon.trim());
+    if (uri == null || uri.scheme.toLowerCase() != 'https') {
+      return box(fallback);
+    }
     return box(ClipRRect(
       borderRadius: BorderRadius.circular(6),
       child: Image.network(
         r.favicon,
         fit: BoxFit.cover,
+        // Directory favicons are often 256-1024 px; decode to ~box size so a
+        // scrolled list doesn't push tens of MB into the image cache (P3).
+        cacheWidth: 120,
         errorBuilder: (_, __, ___) => fallback,
         loadingBuilder: (_, child, progress) =>
             progress == null ? child : fallback,

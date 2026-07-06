@@ -146,8 +146,24 @@ Future<List<RadioBrowserStation>> searchRadioBrowser(
           lastError = HttpException('HTTP ${resp.statusCode}', uri: uri);
           continue; // try the next mirror
         }
-        final body = await resp.transform(utf8.decoder).join();
-        return parseRadioBrowserStations(body);
+        // Cap the body so a hostile/broken mirror can't stream unbounded bytes
+        // into memory (S9a). 8 MB is far above a legitimate `limit`-bounded list.
+        const maxBytes = 8 * 1024 * 1024;
+        final buf = <int>[];
+        var tooLarge = false;
+        await for (final chunk in resp) {
+          if (buf.length + chunk.length > maxBytes) {
+            tooLarge = true;
+            break;
+          }
+          buf.addAll(chunk);
+        }
+        if (tooLarge) {
+          lastError = const HttpException('directory response exceeded 8 MB');
+          continue; // over the cap — try the next mirror
+        }
+        return parseRadioBrowserStations(
+            utf8.decode(buf, allowMalformed: true));
       } catch (e) {
         lastError = e; // connection/timeout — fall through to the next mirror
       }

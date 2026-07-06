@@ -40,6 +40,13 @@ class StreamRecorder {
   // Config, pushed in from prefs by the player.
   bool bufferingEnabled = true;
   int bufferCapBytes = 50 * 1024 * 1024;
+
+  /// Absolute ceiling for an *armed* recording. The buffer normally drops old
+  /// bytes to stay near [bufferCapBytes], but while armed nothing is dropped —
+  /// so a station whose ICY title never changes (or a manual recording never
+  /// saved) would grow until the disk fills. Past this we stop appending,
+  /// freezing the recording at its first N bytes (still valid) (S9b).
+  static const _armedMaxBytes = 500 * 1024 * 1024;
   Future<Directory> Function()? outputDirResolver;
 
   /// Folder for the on-disk buffer segments. Overridable for tests; defaults to
@@ -49,6 +56,9 @@ class StreamRecorder {
   /// Segment size override (bytes). Tests set a tiny value to exercise rolling /
   /// dropping; null ⇒ derived from [bufferCapBytes] (see [_segmentSizeBytes]).
   int? segmentBytesOverride;
+
+  /// Armed-recording ceiling override (bytes) for tests; null ⇒ [_armedMaxBytes].
+  int? armedMaxBytesOverride;
 
   Directory? _tmpDir;
   final List<_Segment> _segments = [];
@@ -126,6 +136,11 @@ class StreamRecorder {
   void addAudio(List<int> bytes) {
     final raf = _raf;
     if (!bufferingEnabled || raf == null) return;
+    // Freeze an armed recording at the absolute ceiling so an endless title
+    // can't fill the disk (S9b). Unarmed, _dropOldSegments bounds it instead.
+    if (_armed && _totalBytes >= (armedMaxBytesOverride ?? _armedMaxBytes)) {
+      return;
+    }
     try {
       raf.writeFromSync(bytes);
       _segments.last.bytes += bytes.length;
@@ -335,13 +350,33 @@ class StreamRecorder {
     return sanitizeFileName(_station.isEmpty ? 'recording' : _station);
   }
 
-  /// Strip filesystem-illegal characters and control codes; collapse whitespace
-  /// and cap the length so the name is safe on Windows, Linux, and Android.
+  static final _illegalFileChars = RegExp(r'[\\/:*?"<>|\x00-\x1f]');
+  static final _whitespaceRun = RegExp(r'\s+');
+
+  /// Windows reserved device basenames (case-insensitive, with or without an
+  /// extension) — a file named e.g. `NUL` or `CON.mp3` can't be created.
+  static const _winReserved = {
+    'CON', 'PRN', 'AUX', 'NUL', //
+    'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
+    'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9',
+  };
+
+  /// Strip filesystem-illegal characters and control codes; collapse whitespace,
+  /// drop a trailing dot, dodge Windows reserved device names, and cap the length
+  /// so the name is safe on Windows, Linux, and Android.
   static String sanitizeFileName(String s) {
-    final cleaned = s
-        .replaceAll(RegExp(r'[\\/:*?"<>|\x00-\x1f]'), '_')
-        .replaceAll(RegExp(r'\s+'), ' ')
+    var cleaned = s
+        .replaceAll(_illegalFileChars, '_')
+        .replaceAll(_whitespaceRun, ' ')
         .trim();
+    // A trailing dot (or space, already trimmed) is illegal on Windows.
+    while (cleaned.endsWith('.')) {
+      cleaned = cleaned.substring(0, cleaned.length - 1).trim();
+    }
+    // Reserved device name? Compare the stem (before the first dot), prefix if so.
+    final dot = cleaned.indexOf('.');
+    final stem = (dot >= 0 ? cleaned.substring(0, dot) : cleaned).toUpperCase();
+    if (_winReserved.contains(stem)) cleaned = '_$cleaned';
     return cleaned.length > 120 ? cleaned.substring(0, 120).trim() : cleaned;
   }
 

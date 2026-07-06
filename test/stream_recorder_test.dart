@@ -30,6 +30,20 @@ void main() {
         'Daft Punk - Aerodynamic',
       );
     });
+
+    test('dodges Windows reserved device names (S8)', () {
+      expect(StreamRecorder.sanitizeFileName('NUL'), '_NUL');
+      expect(StreamRecorder.sanitizeFileName('con'), '_con');
+      expect(StreamRecorder.sanitizeFileName('CON.mp3'), '_CON.mp3');
+      expect(StreamRecorder.sanitizeFileName('COM1'), '_COM1');
+      // A normal name that merely contains a reserved word is untouched.
+      expect(StreamRecorder.sanitizeFileName('CONCERT'), 'CONCERT');
+    });
+
+    test('strips a trailing dot (S8)', () {
+      expect(StreamRecorder.sanitizeFileName('name.'), 'name');
+      expect(StreamRecorder.sanitizeFileName('a...'), 'a');
+    });
   });
 
   group('extForContentType', () {
@@ -281,6 +295,20 @@ void main() {
       expect(File(p1!).readAsBytesSync(), hasLength(120));
       expect(File(p2!).readAsBytesSync(), hasLength(80));
       await r2.dispose();
+    });
+
+    test('an armed recording is bounded by the absolute ceiling (S9b)',
+        () async {
+      r.armedMaxBytesOverride = 300; // tiny ceiling for the test
+      await r.startBuffering();
+      await r.arm('A - B', 'S', 'audio/mpeg');
+      feed(r, 1000, tag: 1); // far past the ceiling
+      // Frozen: retained bytes stopped near the ceiling, not the full 1000.
+      expect(r.bufferedBytes, lessThan(1000));
+      expect(r.bufferedBytes, greaterThanOrEqualTo(300));
+      final path = (await r.onStreamStopped()).path;
+      expect(path, isNotNull);
+      expect(File(path!).lengthSync(), lessThan(1000));
     });
 
     test('dispose removes the private per-process dir', () async {
