@@ -87,6 +87,10 @@ List<List<String>> parseCsv(String input) {
 /// field — values starting with one get a `'` prefix so they're literal text.
 const _csvFormulaLeads = {'=', '+', '-', '@', '\t', '\r'};
 
+/// Characters that force RFC-4180 quoting of a field. Hoisted so it isn't
+/// recompiled on every `csvField` call (a per-row cost on export).
+final _csvSpecial = RegExp(r'[",\n\r]');
+
 /// Escapes a single CSV field: first neutralizes spreadsheet formula injection
 /// (OWASP — a leading `=` `+` `-` `@` TAB or CR is prefixed with a single quote
 /// so it's treated as literal text), then applies RFC 4180 quoting (quote if it
@@ -98,7 +102,7 @@ const _csvFormulaLeads = {'=', '+', '-', '@', '\t', '\r'};
 String csvField(String value) {
   var v = value;
   if (v.isNotEmpty && _csvFormulaLeads.contains(v[0])) v = "'$v";
-  if (v.contains(RegExp(r'[",\n\r]'))) {
+  if (v.contains(_csvSpecial)) {
     return '"${v.replaceAll('"', '""')}"';
   }
   return v;

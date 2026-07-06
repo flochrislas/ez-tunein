@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:path_provider/path_provider.dart';
 
@@ -261,9 +262,13 @@ class StreamRecorder {
           _deleteFileQuietly(src);
         }
       } else {
-        // Concatenate segments in order, streamed in chunks (bounded memory),
-        // skipping any bytes before _recordStartOffset (the lead-in cap).
-        final out = File(outPath).openSync(mode: FileMode.write);
+        // Concatenate segments in order, streamed in 1 MB chunks (bounded
+        // memory), skipping any bytes before _recordStartOffset (the lead-in
+        // cap). Async I/O + a single reused buffer so a multi-MB copy at a track
+        // change doesn't freeze the UI thread (P8); the op is serialized under
+        // _runExclusive, so awaiting here preserves ordering.
+        final out = await File(outPath).open(mode: FileMode.write);
+        final buffer = Uint8List(1024 * 1024);
         try {
           for (final seg in _segments) {
             if (!seg.file.existsSync()) continue;
@@ -271,21 +276,20 @@ class StreamRecorder {
               continue; // entirely before the cut
             }
             final skip = _recordStartOffset - seg.startOffset;
-            final src = seg.file.openSync(mode: FileMode.read);
+            final src = await seg.file.open();
             try {
-              if (skip > 0) src.setPositionSync(skip);
-              const chunk = 1024 * 1024;
+              if (skip > 0) await src.setPosition(skip);
               while (true) {
-                final data = src.readSync(chunk);
-                if (data.isEmpty) break;
-                out.writeFromSync(data);
+                final n = await src.readInto(buffer);
+                if (n == 0) break;
+                await out.writeFrom(buffer, 0, n);
               }
             } finally {
-              src.closeSync();
+              await src.close();
             }
           }
         } finally {
-          out.closeSync();
+          await out.close();
         }
         _deleteAllSegments();
       }

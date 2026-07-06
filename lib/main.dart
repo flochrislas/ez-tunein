@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:audio_service/audio_service.dart';
@@ -56,8 +57,10 @@ void main() async {
   await NotificationPermission.request();
 
   // Materialise the bundled app icon to a cache file once, for a consistent
-  // media-card artwork across both radio and recordings modes.
-  await _prepareArtUri();
+  // media-card artwork across both radio and recordings modes. Best-effort and
+  // only needed at the first media-session publish, so don't block first frame
+  // on it (P10).
+  unawaited(_prepareArtUri());
 
   // Restore the saved accent color before the first frame.
   final prefs = await SharedPreferences.getInstance();

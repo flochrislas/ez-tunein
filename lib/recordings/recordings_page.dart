@@ -267,6 +267,10 @@ class _RecordingsPageState extends State<RecordingsPage>
   Future<void> _setVolume(double v) async {
     setState(() => _volume = v);
     await _player.setVolume(v);
+  }
+
+  /// Persist the volume once, on slider release, not on every drag frame (P9).
+  Future<void> _persistVolume(double v) async {
     await _prefs?.setDouble(volumeKey, v); // shared with the radio player
   }
 
@@ -507,7 +511,11 @@ class _RecordingsPageState extends State<RecordingsPage>
                       ? Icons.volume_off
                       : (_volume < 0.5 ? Icons.volume_down : Icons.volume_up),
                 );
-                final slider = Slider(value: _volume, onChanged: _setVolume);
+                final slider = Slider(
+                  value: _volume,
+                  onChanged: _setVolume,
+                  onChangeEnd: _persistVolume,
+                );
                 final toggles = Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [

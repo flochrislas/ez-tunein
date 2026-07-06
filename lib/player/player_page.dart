@@ -737,6 +737,11 @@ class _PlayerPageState extends State<PlayerPage>
       _muted = false;
     });
     await _player.setVolume(value);
+  }
+
+  /// Persist the volume once, on slider release, rather than on every drag frame
+  /// (P9). Called from the slider's onChangeEnd.
+  Future<void> _persistVolume(double value) async {
     await _prefs?.setDouble(volumeKey, value);
   }
 
@@ -1186,12 +1191,14 @@ class _PlayerPageState extends State<PlayerPage>
   @override
   Widget build(BuildContext context) {
     final playing = _current != null;
-    // Case-insensitive substring match on the station name.
+    // Case-insensitive substring match on the station name (hoist the query's
+    // toLowerCase out of the per-station closure — P11).
+    final q = _query.toLowerCase();
     final visible = _query.isEmpty
         ? _stations
-        : _stations
-            .where((s) => s.name.toLowerCase().contains(_query.toLowerCase()))
-            .toList();
+        : _stations.where((s) => s.name.toLowerCase().contains(q)).toList();
+    // Compute once instead of calling _streamInfoLine() twice in the tree (P11).
+    final streamInfo = playing ? _streamInfoLine() : null;
     return Scaffold(
       appBar: AppBar(
         // Phones are width-constrained, so drop "Radio" from the app-bar name
@@ -1294,6 +1301,7 @@ class _PlayerPageState extends State<PlayerPage>
                       child: Slider(
                         value: _volume,
                         onChanged: _muted ? null : _setVolume,
+                        onChangeEnd: _muted ? null : _persistVolume,
                       ),
                     ),
                   ],
@@ -1340,10 +1348,10 @@ class _PlayerPageState extends State<PlayerPage>
                             style: Theme.of(context).textTheme.headlineSmall,
                             textAlign: TextAlign.center,
                           ),
-                          if (playing && _streamInfoLine() != null) ...[
+                          if (streamInfo != null) ...[
                             const SizedBox(height: 6),
                             Text(
-                              _streamInfoLine()!,
+                              streamInfo,
                               textAlign: TextAlign.center,
                               style: Theme.of(context)
                                   .textTheme
