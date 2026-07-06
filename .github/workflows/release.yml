@@ -24,9 +24,14 @@ on:
     tags:
       - 'v*'
 
+# Least privilege by default: only the `release` job elevates to contents:write
+# (see its own permissions block). Build jobs just read + upload artifacts (S4).
 permissions:
-  contents: write   # create the GitHub Release + upload assets
+  contents: read
 
+# Third-party actions are pinned to full commit SHAs (immutable) with the version
+# in a trailing comment — a moved tag can't swap in malicious code near the
+# signing keystore (S4). Bump the SHA and the comment together when updating.
 env:
   FLUTTER_VERSION: '3.44.1'
 
@@ -37,8 +42,8 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: subosito/flutter-action@v2
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
@@ -53,12 +58,12 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-java@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/setup-java@1bcf9fb12cf4aa7d266a90ae39939e61372fe520 # v5
         with:
           distribution: temurin
           java-version: '21'
-      - uses: subosito/flutter-action@v2
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
@@ -85,15 +90,31 @@ jobs:
       - run: flutter pub get
       - run: flutter build apk --release
 
-      - name: Verify it's signed with the upload key (not debug)
+      - name: Verify it's signed with the expected upload key (not debug)
+        env:
+          # Public SHA-256 of android/upload key (CN=EZ-TuneIn) — fingerprints
+          # aren't secret. Update this if the upload key is ever rotated (S6).
+          EXPECTED_SHA256: '22:15:D5:B0:25:63:E4:58:54:7B:88:10:87:58:D2:0E:72:B7:53:0D:CC:87:31:4E:D0:77:92:AF:E8:2D:E9:3C'
         run: |
           APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -1)
-          "$APKSIGNER" verify --print-certs build/app/outputs/flutter-apk/app-release.apk \
-            | grep -i "certificate DN"
+          CERTS=$("$APKSIGNER" verify --print-certs build/app/outputs/flutter-apk/app-release.apk)
+          echo "$CERTS"
+          # apksigner prints the SHA-256 as lowercase hex, no colons. Normalise
+          # the expected value the same way and require an exact match — grepping
+          # the DN alone would also pass the debug fallback key.
+          got=$(printf '%s\n' "$CERTS" | grep -i 'SHA-256 digest' | grep -oiE '[0-9a-f]{64}' | head -1)
+          want=$(printf '%s' "$EXPECTED_SHA256" | tr -d ':' | tr 'A-F' 'a-f')
+          if [ "$got" != "$want" ]; then
+            echo "::error::APK signing cert SHA-256 ($got) != expected upload key ($want). Refusing to publish."
+            exit 1
+          fi
+          echo "Signing cert matches the expected upload key."
 
       - name: Name the artifact
-        run: cp build/app/outputs/flutter-apk/app-release.apk "ez-tunein-${{ github.ref_name }}-android.apk"
-      - uses: actions/upload-artifact@v7
+        env:
+          TAG: ${{ github.ref_name }}   # via env so the tag can't inject shell (S5)
+        run: cp build/app/outputs/flutter-apk/app-release.apk "ez-tunein-$TAG-android.apk"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: android
           path: ez-tunein-*-android.apk
@@ -104,14 +125,14 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Install Linux desktop + libmpv build deps
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             clang cmake ninja-build pkg-config \
             libgtk-3-dev liblzma-dev libmpv-dev mpv
-      - uses: subosito/flutter-action@v2
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
@@ -122,10 +143,12 @@ jobs:
       - run: flutter build linux --release
 
       - name: Package the bundle
+        env:
+          TAG: ${{ github.ref_name }}   # via env so the tag can't inject shell (S5)
         run: |
           mv build/linux/x64/release/bundle ez-tunein-linux-x64
-          tar czf "ez-tunein-${{ github.ref_name }}-linux-x64.tar.gz" ez-tunein-linux-x64
-      - uses: actions/upload-artifact@v7
+          tar czf "ez-tunein-$TAG-linux-x64.tar.gz" ez-tunein-linux-x64
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: linux
           path: ez-tunein-*-linux-x64.tar.gz
@@ -136,8 +159,8 @@ jobs:
     needs: verify
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: subosito/flutter-action@v2
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
@@ -153,10 +176,12 @@ jobs:
 
       - name: Package the bundle
         shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}   # via env so the tag can't inject shell (S5)
         run: |
           Copy-Item -Recurse build/windows/x64/runner/Release ez-tunein-windows-x64
-          Compress-Archive -Path ez-tunein-windows-x64 -DestinationPath "ez-tunein-${{ github.ref_name }}-windows-x64.zip"
-      - uses: actions/upload-artifact@v7
+          Compress-Archive -Path ez-tunein-windows-x64 -DestinationPath "ez-tunein-$env:TAG-windows-x64.zip"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: windows
           path: ez-tunein-*-windows-x64.zip
@@ -172,8 +197,8 @@ jobs:
     needs: verify
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: subosito/flutter-action@v2
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
@@ -205,6 +230,8 @@ jobs:
           build/macos/Build/Products/Release/ez_tunein.app
 
       - name: Package the .dmg
+        env:
+          TAG: ${{ github.ref_name }}   # via env so the tag can't inject shell (S5)
         run: |
           staging=dmg-staging
           mkdir -p "$staging"
@@ -213,8 +240,8 @@ jobs:
           # A universal (arm64 + x86_64) build ⇒ one .dmg for Intel & Apple
           # Silicon, hence the plain "-macos" suffix (no -x64).
           hdiutil create -volname "EZ-TuneIn" -srcfolder "$staging" \
-            -ov -format UDZO "ez-tunein-${{ github.ref_name }}-macos.dmg"
-      - uses: actions/upload-artifact@v7
+            -ov -format UDZO "ez-tunein-$TAG-macos.dmg"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: macos
           path: ez-tunein-*-macos.dmg
@@ -224,12 +251,14 @@ jobs:
   release:
     needs: [android, linux, windows, macos]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # only this job creates the Release + uploads assets (S4)
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: artifacts
       - name: Publish draft release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3
         with:
           draft: true               # review & publish manually
           generate_release_notes: true

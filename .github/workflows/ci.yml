@@ -9,6 +9,10 @@ on:
     branches: [main]
   pull_request:
 
+# Least privilege: this workflow only reads the repo (S7).
+permissions:
+  contents: read
+
 env:
   FLUTTER_VERSION: '3.44.1'
 
@@ -16,8 +20,10 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: subosito/flutter-action@v2
+      # Actions are pinned to full commit SHAs (immutable) — the version tag is
+      # in the trailing comment. Bump both together when updating (S4).
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
