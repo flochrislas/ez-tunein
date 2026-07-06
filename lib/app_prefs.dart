@@ -37,8 +37,9 @@ const recBufferingKey = 'rec_buffering';
 const recBufferMbKey = 'rec_buffer_mb';
 // rec_dir lives in storage_paths.dart (recDirKey) since recordingsDir() reads it.
 const recBufferMbDefault = 35;
-// Cap the buffer so the synchronous trim (reads ~cap bytes into RAM) can't cause
-// a large memory spike / UI hitch. See doc/implementation-notes.md.
+// Cap the buffer to bound disk use + the finalize copy (the ring buffer drops
+// whole old segments to stay near the cap — no full-buffer rewrite). See
+// doc/implementation-notes.md.
 const recBufferMbMax = 128;
 // Lead-in cap (seconds) for *manual* recordings on title-less stations: how much
 // already-buffered audio to keep before the Record tap. -1 ⇒ the whole buffer.
@@ -55,3 +56,9 @@ const recRandomizeKey = 'rec_randomize'; // pick the next file at random
 /// to whichever page is currently driving audio. On mobile it's created via
 /// `AudioService.init`; on desktop it's plain-constructed (no native session).
 late EzAudioHandler audioHandler;
+
+// Identifying User-Agent for outbound HTTP (the ICY metadata socket + the Radio
+// Browser directory, which asks for a "speaking" agent). Set once in main() from
+// package_info_plus to `ez_tunein/<version>`; the fallback covers any path that
+// runs before main() sets it.
+var appUserAgent = 'ez_tunein';

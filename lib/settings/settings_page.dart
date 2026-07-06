@@ -54,15 +54,19 @@ class _SettingsPageState extends State<SettingsPage> {
 
   /// Open the GitHub Releases page in the browser (best-effort).
   Future<void> _openReleases() async {
+    // launchUrl returns false (rather than throwing) on several platforms when
+    // it can't launch, so check the bool too — not just catch.
+    var ok = false;
     try {
-      await launchUrl(Uri.parse(_releasesUrl),
+      ok = await launchUrl(Uri.parse(_releasesUrl),
           mode: LaunchMode.externalApplication);
     } catch (_) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Could not open the browser.')),
-        );
-      }
+      ok = false;
+    }
+    if (!ok && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not open the browser.')),
+      );
     }
   }
 

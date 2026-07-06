@@ -40,7 +40,9 @@ class _Segment {
 class StreamRecorder {
   // Config, pushed in from prefs by the player.
   bool bufferingEnabled = true;
-  int bufferCapBytes = 50 * 1024 * 1024;
+  // Default matches recBufferMbDefault (35 MB) in app_prefs; the player always
+  // overwrites this from prefs, so it only applies to a recorder built elsewhere.
+  int bufferCapBytes = 35 * 1024 * 1024;
 
   /// Absolute ceiling for an *armed* recording. The buffer normally drops old
   /// bytes to stay near [bufferCapBytes], but while armed nothing is dropped —

@@ -5,6 +5,7 @@ import 'package:audio_service/audio_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:just_audio_media_kit/just_audio_media_kit.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
@@ -61,6 +62,14 @@ void main() async {
   // only needed at the first media-session publish, so don't block first frame
   // on it (P10).
   unawaited(_prepareArtUri());
+
+  // Derive the outbound User-Agent from the package version once, so the ICY
+  // socket + Radio Browser directory identify as ez_tunein/<version> (A4).
+  try {
+    appUserAgent = 'ez_tunein/${(await PackageInfo.fromPlatform()).version}';
+  } catch (_) {
+    // Keep the plain fallback if the platform channel isn't available.
+  }
 
   // Restore the saved accent color before the first frame.
   final prefs = await SharedPreferences.getInstance();

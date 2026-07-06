@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../app_prefs.dart';
+import '../log.dart';
 import '../models/station.dart';
 import '../radio_browser.dart';
 import '../url_utils.dart';
@@ -44,7 +46,7 @@ class _StationSearchPageState extends State<StationSearchPage> {
       _searched = true;
     });
     try {
-      final results = await searchRadioBrowser(q);
+      final results = await searchRadioBrowser(q, userAgent: appUserAgent);
       if (!mounted) return;
       setState(() {
         _results = results;
@@ -52,7 +54,8 @@ class _StationSearchPageState extends State<StationSearchPage> {
         _selected.removeWhere((u) => !results.any((r) => r.streamUrl == u));
         _loading = false;
       });
-    } catch (_) {
+    } catch (e) {
+      logSwallowed('searchRadioBrowser', e);
       if (!mounted) return;
       setState(() {
         _loading = false;

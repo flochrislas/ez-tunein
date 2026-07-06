@@ -123,6 +123,11 @@ class IcyReader {
   StreamSubscription<List<int>>? _sub;
   Timer? _reconnectTimer;
 
+  /// User-Agent for the metadata/audio socket. Defaults to a plain fallback so
+  /// this module stays Flutter-free/testable; the player sets it to
+  /// `ez_tunein/<version>` (some Icecast hosts filter on the UA).
+  String userAgent = 'ez_tunein';
+
   /// MIME type (e.g. `audio/mpeg`) and bitrate of the current stream, taken from
   /// the response headers. Best-effort: either may be null. Used to choose the
   /// recording file extension and to show the rate in the recording settings.
@@ -181,7 +186,7 @@ class IcyReader {
     try {
       final req = await client.getUrl(Uri.parse(_url!));
       req.headers.set('Icy-MetaData', '1');
-      req.headers.set('User-Agent', 'radio-app');
+      req.headers.set('User-Agent', userAgent);
       final resp = await req.close();
       if (gen != _generation) {
         client.close(force: true);

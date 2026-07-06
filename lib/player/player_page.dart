@@ -14,6 +14,7 @@ import '../audio_handler.dart';
 import '../csv_export.dart';
 import '../csv_utils.dart';
 import '../icy_reader.dart';
+import '../log.dart';
 import '../models/station.dart';
 import '../recordings/recordings_page.dart';
 import '../settings/settings_page.dart';
@@ -108,8 +109,9 @@ class _PlayerPageState extends State<PlayerPage>
       unawaited(windowManager.setPreventClose(true));
     }
     // ICY callbacks are wired per-station in _play (with a session guard); see
-    // there. Just the output-folder resolver here.
+    // there. Just the output-folder resolver + the versioned User-Agent here.
     _recorder.outputDirResolver = _resolveOutputDir;
+    _icy.userAgent = appUserAgent;
     // Observe the radio player so a mid-stream failure surfaces instead of the
     // UI (and the auto-reconnecting ICY feed) pretending it's still playing (C3).
     _playbackSub = _player.playbackEventStream.listen(
@@ -154,8 +156,9 @@ class _PlayerPageState extends State<PlayerPage>
         loadedStations = (jsonDecode(savedStations) as List)
             .map((e) => Station.fromJson(e as Map<String, dynamic>))
             .toList();
-      } catch (_) {
+      } catch (e) {
         loadedStations = null; // corrupt — fall back to defaults
+        logSwallowed('_restorePrefs stations decode', e);
       }
     }
 
@@ -952,8 +955,9 @@ class _PlayerPageState extends State<PlayerPage>
         await file.writeAsString('timestamp,station,artist,title,album,raw\n');
       }
       await file.writeAsString('$row\n', mode: FileMode.append);
-    } catch (_) {
-      // History is a best-effort log — ignore write failures.
+    } catch (e) {
+      // History is a best-effort log — don't disrupt playback, just trace it.
+      logSwallowed('_recordHistory', e);
     }
   }
 

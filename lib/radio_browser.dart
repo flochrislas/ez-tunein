@@ -111,8 +111,10 @@ const _radioBrowserHosts = <String>[
   'nl1.api.radio-browser.info',
 ];
 
-/// The API asks apps to send an identifying ("speaking") User-Agent.
-const _userAgent = 'ez_tunein/0.8.1';
+/// Fallback User-Agent when the caller doesn't supply one (tests). Production
+/// passes `ez_tunein/<version>` in via [searchRadioBrowser]'s userAgent param —
+/// the API asks apps to send an identifying ("speaking") agent.
+const _fallbackUserAgent = 'ez_tunein';
 
 /// Search stations by keyword. Returns the most-voted, non-broken matches.
 /// Throws if every mirror fails; the caller turns that into a friendly message.
@@ -121,12 +123,13 @@ Future<List<RadioBrowserStation>> searchRadioBrowser(
   String query, {
   HttpClient? client,
   int limit = 60,
+  String userAgent = _fallbackUserAgent,
 }) async {
   final q = query.trim();
   if (q.isEmpty) return const [];
 
   final http = client ?? HttpClient();
-  http.userAgent = _userAgent;
+  http.userAgent = userAgent;
   http.connectionTimeout = const Duration(seconds: 8);
 
   try {

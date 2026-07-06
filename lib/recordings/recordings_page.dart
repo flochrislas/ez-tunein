@@ -53,6 +53,7 @@ class _RecordingsPageState extends State<RecordingsPage>
   // Monotonic play-session id: bumped per _playAt/_stopPlayback so a superseded
   // rapid tap can't win the race and desync the player vs the UI (C9).
   int _playSession = 0;
+  final _rng = Random(); // reused instead of allocating one per _nextIndex call
 
   @override
   void initState() {
@@ -183,7 +184,7 @@ class _RecordingsPageState extends State<RecordingsPage>
     if (n == 0) return -1;
     if (_randomize) {
       if (n == 1) return 0;
-      var r = Random().nextInt(n);
+      var r = _rng.nextInt(n);
       if (r == _index) r = (r + 1) % n; // avoid an immediate repeat
       return r;
     }
