@@ -40,6 +40,33 @@ void main() {
         ['a', 'b'],
       ]);
     });
+
+    test('keeps a trailing empty field (trailing comma)', () {
+      expect(parseCsv('a,'), [
+        ['a', ''],
+      ]);
+      expect(parseCsv('a,\n'), [
+        ['a', ''],
+      ]);
+    });
+
+    test('handles an escaped quote and a comma in one quoted field', () {
+      expect(parseCsv('"a"",b"'), [
+        ['a",b'],
+      ]);
+    });
+
+    test('keeps empty middle lines as empty rows', () {
+      expect(parseCsv('a\n\nb'), [
+        ['a'],
+        [''],
+        ['b'],
+      ]);
+    });
+
+    test('returns no rows for empty input', () {
+      expect(parseCsv(''), <List<String>>[]);
+    });
   });
 
   group('csvField', () {
@@ -61,6 +88,22 @@ void main() {
 
     test('round-trips through parseCsv', () {
       const fields = ['plain', 'a,b', 'has "quote"', 'multi\nline'];
+      final line = fields.map(csvField).join(',');
+      expect(parseCsv('$line\n'), [fields]);
+    });
+
+    test('round-trips tricky values verbatim (encode → parse)', () {
+      const fields = [
+        'plain',
+        'a,b,c',
+        'has "quotes" inside',
+        'multi\nline\nvalue',
+        'trailing quote"',
+        '"leading quote',
+        'comma, and "quote"',
+        'tab\tinside',
+        '', // empty field
+      ];
       final line = fields.map(csvField).join(',');
       expect(parseCsv('$line\n'), [fields]);
     });

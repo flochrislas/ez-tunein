@@ -4,43 +4,82 @@
 
 /// Minimal RFC 4180 CSV parser: handles quoted fields, escaped quotes (""),
 /// and embedded commas/newlines. Returns rows of string fields.
+///
+/// Scans by `codeUnitAt` (int comparisons, no per-character `String`) and slices
+/// whole fields with `substring`; a `StringBuffer` is only used inside a quoted
+/// field that actually contains an escaped `""`. This keeps a large-history parse
+/// allocation-light (the old char-by-char version allocated ~1 String per input
+/// char — the dominant History-open cost).
 List<List<String>> parseCsv(String input) {
+  const quote = 0x22, comma = 0x2C, lf = 0x0A, cr = 0x0D;
   final rows = <List<String>>[];
+  final len = input.length;
   var row = <String>[];
-  var field = StringBuffer();
-  var inQuotes = false;
+  var i = 0;
 
-  for (var i = 0; i < input.length; i++) {
-    final c = input[i];
-    if (inQuotes) {
-      if (c == '"') {
-        if (i + 1 < input.length && input[i + 1] == '"') {
-          field.write('"');
-          i++;
-        } else {
-          inQuotes = false;
+  while (i < len) {
+    // --- parse one field starting at i ---
+    String value;
+    if (input.codeUnitAt(i) == quote) {
+      i++; // skip the opening quote
+      var spanStart = i;
+      StringBuffer? buf; // created only when an escaped "" is hit
+      while (true) {
+        if (i >= len) {
+          // Unterminated quote: take the rest of the input (lenient).
+          final tail = input.substring(spanStart, len);
+          value = buf == null ? tail : (buf..write(tail)).toString();
+          break;
         }
-      } else {
-        field.write(c);
+        if (input.codeUnitAt(i) == quote) {
+          if (i + 1 < len && input.codeUnitAt(i + 1) == quote) {
+            // "" ⇒ one literal quote: keep content up to and including it.
+            buf ??= StringBuffer();
+            buf.write(input.substring(spanStart, i + 1));
+            i += 2;
+            spanStart = i;
+          } else {
+            final span = input.substring(spanStart, i);
+            value = buf == null ? span : (buf..write(span)).toString();
+            i++; // consume the closing quote
+            break;
+          }
+        } else {
+          i++;
+        }
       }
-    } else if (c == '"') {
-      inQuotes = true;
-    } else if (c == ',') {
-      row.add(field.toString());
-      field = StringBuffer();
-    } else if (c == '\n') {
-      row.add(field.toString());
-      field = StringBuffer();
+    } else {
+      final start = i;
+      while (i < len) {
+        final ch = input.codeUnitAt(i);
+        if (ch == comma || ch == lf || ch == cr) break;
+        i++;
+      }
+      value = input.substring(start, i);
+    }
+    row.add(value);
+
+    // --- delimiter after the field ---
+    if (i >= len) break; // EOF right after a field ⇒ flush the row below
+    final d = input.codeUnitAt(i);
+    if (d == comma) {
+      i++;
+      if (i >= len) {
+        row.add(''); // trailing comma ⇒ one empty field, then flush
+        break;
+      }
+    } else if (d == lf) {
+      i++;
       rows.add(row);
       row = <String>[];
-    } else if (c != '\r') {
-      field.write(c);
+    } else if (d == cr) {
+      i++;
+      if (i < len && input.codeUnitAt(i) == lf) i++; // CRLF ⇒ one terminator
+      rows.add(row);
+      row = <String>[];
     }
   }
-  if (field.isNotEmpty || row.isNotEmpty) {
-    row.add(field.toString());
-    rows.add(row);
-  }
+  if (row.isNotEmpty) rows.add(row);
   return rows;
 }
 
