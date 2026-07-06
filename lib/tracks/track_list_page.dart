@@ -327,15 +327,8 @@ class _TrackListPageState extends State<TrackListPage> {
 
   /// Best-effort reveal of [file]'s folder in the desktop file manager.
   Future<void> _openContainingFolder(File file) async {
-    final dir = file.parent.path;
     try {
-      if (Platform.isLinux) {
-        await Process.run('xdg-open', [dir]);
-      } else if (Platform.isWindows) {
-        await Process.run('explorer', [dir]);
-      } else if (Platform.isMacOS) {
-        await Process.run('open', [dir]);
-      }
+      await revealInFileManager(file.parent.path);
     } catch (_) {
       // Opening a file manager is a nicety; ignore failures.
     }

@@ -11,12 +11,15 @@ import 'package:window_manager/window_manager.dart';
 
 import '../app_prefs.dart';
 import '../audio_handler.dart';
+import '../csv_export.dart';
 import '../csv_utils.dart';
 import '../icy_reader.dart';
 import '../models/station.dart';
 import '../recordings/recordings_page.dart';
 import '../settings/settings_page.dart';
+import '../stations/default_stations.dart';
 import '../stations/station_dialog.dart';
+import '../stations/station_merge.dart';
 import '../stations/station_search_page.dart';
 import '../stations/station_tile.dart';
 import '../storage_paths.dart';
@@ -24,141 +27,6 @@ import '../stream_recorder.dart';
 import '../track_utils.dart';
 import '../tracks/track_list_page.dart';
 import '../url_utils.dart';
-
-// The list users start with on first launch; afterwards it's whatever they've
-// saved (see stationsKey). Add/remove from the UI.
-// Sourced from radios-selection.csv — keep the two in sync if you curate the set.
-const _defaultStations = <Station>[
-  // Direct relay from swissgroove.ch's listen.php M3U.
-  Station('SwissGroove', 'http://relay1.swissgroove.ch:80'),
-  // Nightride FM — Icecast mounts, 320 kbps MP3.
-  Station('Nightride FM (Synthwave / Outrun)',
-      'https://stream.nightride.fm/nightride.mp3'),
-  Station('Nightride FM — Chillsynth',
-      'https://stream.nightride.fm/chillsynth.mp3'),
-  Station('Nightride FM — Datawave (Glitchy Retro Computing / IDM)',
-      'https://stream.nightride.fm/datawave.mp3'),
-  Station('Nightride FM — Darksynth (Cyberpunk / Synthmetal)',
-      'https://stream.nightride.fm/darksynth.mp3'),
-  Station('Nightride FM — Spacesynth (Space Disco / Italo)',
-      'https://stream.nightride.fm/spacesynth.mp3'),
-  Station('Nightride FM — Horrorsynth',
-      'https://stream.nightride.fm/horrorsynth.mp3'),
-  Station('Nightride FM — EBSM (Industrial / Electronic Body Synth Music)',
-      'https://stream.nightride.fm/ebsm.mp3'),
-  Station('Rekt Network — Rekt (Drum & Bass / EDM)',
-      'https://stream.nightride.fm/rekt.mp3'),
-  Station('Rekt Network — Rektory (1930s Fallout-style Jazz)',
-      'https://stream.nightride.fm/rektory.mp3'),
-  Station(
-      'SomaFM — Groove Salad', 'http://ice5.somafm.com/groovesalad-128-mp3'),
-  Station('SomaFM — Drone Zone', 'http://ice5.somafm.com/dronezone-128-mp3'),
-  Station(
-      'SomaFM — Deep Space One', 'http://ice5.somafm.com/deepspaceone-128-mp3'),
-  Station('SomaFM — Space Station Soma',
-      'http://ice5.somafm.com/spacestation-128-mp3'),
-  Station('SomaFM — The Dark Zone', 'http://ice5.somafm.com/darkzone-128-mp3'),
-  Station(
-      'SomaFM — Beat Blender', 'http://ice5.somafm.com/beatblender-128-mp3'),
-  Station('SomaFM — Vaporwaves', 'http://ice5.somafm.com/vaporwaves-128-mp3'),
-  Station('SomaFM — Underground 80s', 'http://ice5.somafm.com/u80s-128-mp3'),
-  Station('SomaFM — Lush', 'http://ice5.somafm.com/lush-128-mp3'),
-  Station('SomaFM — The Trip', 'http://ice5.somafm.com/thetrip-128-mp3'),
-  Station(
-      'SomaFM — Suburbs of Goa', 'http://ice5.somafm.com/suburbsofgoa-128-mp3'),
-  Station('SomaFM — DEF CON Radio', 'http://ice5.somafm.com/defcon-128-mp3'),
-  Station('SomaFM — Mission Control',
-      'http://ice5.somafm.com/missioncontrol-128-mp3'),
-  Station(
-      'SomaFM — Secret Agent', 'http://ice5.somafm.com/secretagent-128-mp3'),
-  Station(
-      'SomaFM — Indie Pop Rocks!', 'http://ice5.somafm.com/indiepop-128-mp3'),
-  Station('Funky Radio (Classic Uncut Funk) — 320kbps MP3',
-      'https://funkyradio.streamingmedia.it/play.mp3'),
-  Station('Funky Radio (Classic Uncut Funk) — 192kbps AAC',
-      'https://funkyradio.streamingmedia.it/audio.aac'),
-  Station('Le Mellotron (Soul / Funk / Hip-Hop) — 128kbps MP3',
-      'https://listen.radioking.com/radio/477719/stream/534044'),
-  Station('Funky Corner Radio — 192kbps MP3',
-      'https://ais-sa2.cdnstream1.com/2447_192.mp3'),
-  Station('B4B Disco Funk — 128kbps MP3',
-      'https://eu10.fastcast4u.com:8120/stream?sid=1'),
-  Station('Radio Meuh — 128kbps MP3',
-      'http://radiomeuh.ice.infomaniak.ch/radiomeuh-128.mp3'),
-  Station('Classic Rock Replay (1.FM) — 192kbps MP3',
-      'http://185.33.21.112:80/crock_64a'),
-  Station('Progulus Radio — 192kbps MP3',
-      'https://centova.radioservers.biz/proxy/klemmer/stream'),
-  Station('Morow — 128kbps MP3', 'http://stream.morow.com:8080/morow_med.mp3'),
-  Station('Radio BOB! Prog-Rock — 192kbps MP3',
-      'http://streams.radiobob.de/progrock/mp3-192/homepage'),
-  Station('St. Louis Classic Rock — 256kbps MP3',
-      'http://74.208.89.18:8000/SLCR4_highdef.mp3'),
-  Station('Radio BOB! Grunge — 192kbps MP3',
-      'https://streams.radiobob.de/bob-grunge/mp3-192/'),
-  Station('Radio BOB! Punk — 192kbps MP3',
-      'https://streams.radiobob.de/bob-punk/mp3-192/'),
-  Station('Prog Rock and Metal (PRM) — 128kbps MP3',
-      'http://149.56.234.138:8025/stream'),
-  Station('Proteus Radio — 128kbps MP3',
-      'https://proteusradio.ddns.net:9900/proteus.mp3'),
-  Station('Radio BOB! Power Metal — 192kbps MP3',
-      'https://streams.radiobob.de/powermetal/mp3-192/'),
-  Station('Radio BOB! Symphonic Metal — 192kbps MP3',
-      'https://streams.radiobob.de/symphonicmetal/mp3-192/'),
-  Station("Mouv' (Radio France) — 128kbps MP3",
-      'https://direct.mouv.fr/live/mouv-midfi.mp3'),
-  Station(
-      'Skyrock — 128kbps MP3', 'http://icecast.skyrock.net/s/natio_mp3_128k'),
-  Station('Générations — 128kbps MP3',
-      'https://generationfm.ice.infomaniak.ch/generationfm-high.mp3'),
-  Station('J-Pop Powerplay — 128kbps MP3',
-      'https://kathy.torontocast.com:3560/stream'),
-  Station('J-Rock Powerplay — 128kbps MP3',
-      'https://kathy.torontocast.com:3340/stream'),
-  Station('J-Pop Powerplay Kawaii — 128kbps MP3',
-      'https://kathy.torontocast.com:3060/stream'),
-  Station('AnimeNfo Radio (Zeno Mirror) — 128kbps MP3',
-      'https://stream.zeno.fm/xwa8ckz7mzzuv'),
-  Station('Eurobeat FM — 128kbps MP3', 'https://stream.laut.fm/eurobeat'),
-  Station('Radio BOB! Gaming Rock — 192kbps MP3',
-      'https://streams.radiobob.de/gamingrock/mp3-192/'),
-  Station('SLAY Radio (Retro Gaming) — 128kbps AAC',
-      'http://relay1.slayradio.org:8000/'),
-  Station(
-      'Bigbeat-Radio — 128kbps MP3', 'https://stream.laut.fm/bigbeat-radio'),
-  Station('Joint Radio Reggae — 128kbps MP3',
-      'http://radio.jointil.net:9998/stream'),
-  Station('Skafari — 128kbps MP3', 'https://stream.laut.fm/skafari'),
-  Station('Ruffneck Smille — 128kbps MP3',
-      'https://stream.laut.fm/ruffneck-smille'),
-  Station('Radio Swiss Classic (French) — 128kbps MP3',
-      'http://stream.srg-ssr.ch/m/rsc_fr/mp3_128'),
-  Station('Radio Swiss Classic (German) — 128kbps MP3',
-      'http://stream.srg-ssr.ch/m/rsc_de/mp3_128'),
-  Station('WQXR Classical — 128kbps MP3', 'http://stream.wqxr.org/wqxr'),
-  Station('FIP Sacré Français ! — 128kbps MP3',
-      'https://icecast.radiofrance.fr/fipsacrefrancais-midfi.mp3'),
-  Station('Chante France — 128kbps MP3',
-      'http://chantefrance.ice.infomaniak.ch/chantefrance-128.mp3'),
-  Station('Dubstep.fm — 256kbps MP3', 'http://stream.dubstep.fm/256mp3'),
-  Station('Dubstep.fm — 128kbps MP3', 'http://stream.dubstep.fm/128mp3'),
-  Station('Best of Trap — 128kbps MP3', 'https://stream.laut.fm/bestoftrap'),
-  Station('Sub.FM (Dubstep / Garage / Grime) — 192kbps MP3',
-      'http://subfm.radioca.st/Sub.FM'),
-  Station('Radio BOB! Nu Metal — 192kbps MP3',
-      'https://streams.radiobob.de/numetal/mp3-192/'),
-  Station('Radio BOB! Rap Metal — 192kbps MP3',
-      'https://streams.radiobob.de/rapmetal/mp3-192/'),
-  Station('Radio BOB! Alternative — 192kbps MP3',
-      'https://streams.radiobob.de/alternative/mp3-192/'),
-  Station('Celtic Music Radio (Glasgow) — 128kbps MP3',
-      'http://stream.celticmusicradio.net:8000/celticmusic.mp3'),
-  Station('SomaFM — Folk Forward — 128kbps MP3',
-      'http://ice5.somafm.com/folkfwd-128-mp3'),
-  Station(
-      'RTÉ Raidió na Gaeltachta — 128kbps MP3', 'https://icecast.rte.ie/rnag'),
-];
 
 class PlayerPage extends StatefulWidget {
   const PlayerPage({super.key});
@@ -175,7 +43,7 @@ class _PlayerPageState extends State<PlayerPage>
   Timer? _resizeDebounce;
 
   SharedPreferences? _prefs;
-  List<Station> _stations = List.of(_defaultStations);
+  List<Station> _stations = List.of(defaultStations);
   Station? _current;
   // True while the stream is paused from the media session/Bluetooth: audio is
   // stopped but the metadata/recording socket stays alive (non-destructive).
@@ -370,15 +238,14 @@ class _PlayerPageState extends State<PlayerPage>
       ),
     );
     if (picked == null || picked.isEmpty) return;
-    final seen = _stations.map((s) => s.url).toSet();
-    final toAdd = picked.where((s) => seen.add(s.url)).toList();
-    if (toAdd.isEmpty) {
+    final merged = mergeStations(_stations, picked);
+    if (merged.added.isEmpty) {
       _snack('Already in your list.');
       return;
     }
-    setState(() => _stations.addAll(toAdd));
+    setState(() => _stations.addAll(merged.added));
     await _saveStations();
-    _snack('Added ${toAdd.length} station(s).');
+    _snack('Added ${merged.added.length} station(s).');
   }
 
   Future<void> _editStation(Station old) async {
@@ -444,11 +311,8 @@ class _PlayerPageState extends State<PlayerPage>
       return;
     }
 
-    final seen = _stations.map((s) => s.url).toSet();
-    final toAdd = <Station>[];
-    var skipped = 0;
+    final parsed = <Station>[];
     var invalid = 0; // rows dropped for a non-http(s) URL (S2)
-    var playlist = 0; // imported rows whose URL looks like a playlist wrapper
     for (final r in parseCsv(content)) {
       if (r.length < 2) continue;
       final name = r[0].trim();
@@ -461,13 +325,14 @@ class _PlayerPageState extends State<PlayerPage>
         invalid++;
         continue;
       }
-      if (!seen.add(url)) {
-        skipped++; // duplicate within the file or already in the list
-        continue;
-      }
-      if (isPlaylistUrl(url)) playlist++;
-      toAdd.add(Station(name, url));
+      parsed.add(Station(name, url));
     }
+    // Shared dedup with the online-search path (skips URLs already present or
+    // duplicated within the file).
+    final merged = mergeStations(_stations, parsed);
+    final toAdd = merged.added;
+    final skipped = merged.skipped;
+    final playlist = toAdd.where((s) => isPlaylistUrl(s.url)).length;
 
     if (toAdd.isEmpty) {
       final reasons = <String>[
@@ -505,27 +370,13 @@ class _PlayerPageState extends State<PlayerPage>
     for (final s in _stations) {
       csv.writeln('${csvField(s.name)},${csvField(s.url)}');
     }
-    final bytes = utf8.encode(csv.toString());
-
-    String? path;
     try {
-      path = await FilePicker.platform.saveFile(
-        dialogTitle: 'Export radio stations',
+      final outcome = await saveCsvViaPicker(
+        csv: csv.toString(),
         fileName: 'ez_tunein_stations.csv',
-        type: FileType.custom,
-        allowedExtensions: ['csv'],
-        // Mobile can't hand back a writable path, so file_picker writes these
-        // bytes itself; on desktop it returns the path and we write below.
-        bytes: isDesktop ? null : bytes,
+        dialogTitle: 'Export radio stations',
       );
-    } catch (e) {
-      _snack('Export failed: $e');
-      return;
-    }
-    if (path == null) return; // user cancelled
-
-    try {
-      if (isDesktop) await File(path).writeAsString(csv.toString());
+      if (outcome == CsvSaveOutcome.cancelled) return;
       _snack('Exported ${_stations.length} station(s).');
     } catch (e) {
       _snack('Export failed: $e');

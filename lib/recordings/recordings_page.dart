@@ -1,9 +1,7 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:share_plus/share_plus.dart';
@@ -11,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../app_prefs.dart';
 import '../audio_handler.dart';
+import '../csv_export.dart';
 import '../csv_utils.dart';
 import '../settings/settings_page.dart';
 import '../storage_paths.dart';
@@ -286,23 +285,13 @@ class _RecordingsPageState extends State<RecordingsPage>
       final p = _parts(f);
       csv.writeln('${csvField(p.artist)},${csvField(p.title)}');
     }
-    final bytes = utf8.encode(csv.toString());
-    String? path;
     try {
-      path = await FilePicker.platform.saveFile(
-        dialogTitle: 'Export recordings list',
+      final outcome = await saveCsvViaPicker(
+        csv: csv.toString(),
         fileName: 'ez_tunein_recordings.csv',
-        type: FileType.custom,
-        allowedExtensions: ['csv'],
-        bytes: isDesktop ? null : bytes,
+        dialogTitle: 'Export recordings list',
       );
-    } catch (e) {
-      _snack('Export failed: $e');
-      return;
-    }
-    if (path == null) return; // cancelled
-    try {
-      if (isDesktop) await File(path).writeAsString(csv.toString());
+      if (outcome == CsvSaveOutcome.cancelled) return;
       _snack('Exported ${_files.length} recording(s).');
     } catch (e) {
       _snack('Export failed: $e');
@@ -379,14 +368,7 @@ class _RecordingsPageState extends State<RecordingsPage>
   /// rename / delete files directly. Best-effort, desktop only.
   Future<void> _openFolder() async {
     try {
-      final dir = (await recordingsDir()).path;
-      if (Platform.isLinux) {
-        await Process.run('xdg-open', [dir]);
-      } else if (Platform.isWindows) {
-        await Process.run('explorer', [dir]);
-      } else if (Platform.isMacOS) {
-        await Process.run('open', [dir]);
-      }
+      await revealInFileManager((await recordingsDir()).path);
     } catch (e) {
       _snack('Could not open the folder: $e');
     }

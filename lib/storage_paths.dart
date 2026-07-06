@@ -77,3 +77,16 @@ Future<File> historyFile() async {
   final dir = await getApplicationDocumentsDirectory();
   return File('${dir.path}/radio_history.csv');
 }
+
+/// Open [dirPath] in the desktop file manager (xdg-open / explorer / open).
+/// Best-effort and Flutter-free; throws on failure so the caller can decide
+/// whether to surface it. Shared by the recordings view and the tracks view.
+Future<void> revealInFileManager(String dirPath) async {
+  if (Platform.isLinux) {
+    await Process.run('xdg-open', [dirPath]);
+  } else if (Platform.isWindows) {
+    await Process.run('explorer', [dirPath]);
+  } else if (Platform.isMacOS) {
+    await Process.run('open', [dirPath]);
+  }
+}
