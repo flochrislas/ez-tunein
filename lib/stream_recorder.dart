@@ -4,6 +4,10 @@ import 'package:path_provider/path_provider.dart';
 
 import 'track_utils.dart';
 
+/// Outcome of a finalize: [path] set ⇒ saved; both null ⇒ nothing was armed
+/// (normal no-op); [error] set ⇒ the finalize failed (surface it to the user).
+typedef FinalizeResult = ({String? path, Object? error});
+
 /// One on-disk buffer segment: a file, how many bytes it holds, and the logical
 /// offset of its first byte within the session's monotonic byte stream (used to
 /// honour a lead-in cap at finalize). The live track's audio spans a sequence.
@@ -186,32 +190,33 @@ class StreamRecorder {
   void cancel() => _armed = false;
 
   /// Finalize an armed recording (if any) and start a clean buffer for the next
-  /// track. Returns the saved file path, or null if nothing was recording.
-  Future<String?> onTrackChanged() => _runExclusive(() async {
-        final path = await _finalizeIfArmed();
+  /// track. Returns the finalize outcome (see [FinalizeResult]).
+  Future<FinalizeResult> onTrackChanged() => _runExclusive(() async {
+        final result = await _finalizeIfArmed();
         await _startBuffering();
-        return path;
+        return result;
       });
 
   /// Finalize an armed recording (if any) and tear the buffer down (stream ended
   /// or the station was switched).
-  Future<String?> onStreamStopped() => _runExclusive(() async {
-        final path = await _finalizeIfArmed();
+  Future<FinalizeResult> onStreamStopped() => _runExclusive(() async {
+        final result = await _finalizeIfArmed();
         await _closeAndDeleteAll();
-        return path;
+        return result;
       });
 
   Future<void> dispose() => _runExclusive(_closeAndDeleteAll);
 
-  Future<String?> _finalizeIfArmed() async {
-    if (!_armed) return null;
+  Future<FinalizeResult> _finalizeIfArmed() async {
+    if (!_armed) return (path: null, error: null);
     _armed = false;
     await _closeRaf(); // close the active segment; keep the files for the move
-    if (_segments.isEmpty) return null;
+    if (_segments.isEmpty) return (path: null, error: null);
+    String? outPath; // declared here so the catch can delete a partial file
     try {
       final dir = await outputDirResolver!();
       if (!await dir.exists()) await dir.create(recursive: true);
-      final outPath = await uniqueFilePath(dir, _fileNameBase(), _ext);
+      outPath = await uniqueFilePath(dir, _fileNameBase(), _ext);
       // Does a lead-in cap mean we must drop the front of the oldest segment?
       final needsFrontSkip = _segments.isNotEmpty &&
           _recordStartOffset > _segments.first.startOffset;
@@ -255,9 +260,14 @@ class StreamRecorder {
       }
       _segments.clear();
       _totalBytes = 0;
-      return outPath;
-    } catch (_) {
-      return null;
+      return (path: outPath, error: null);
+    } catch (e) {
+      // Finalize failed (disk full, unwritable folder, …). Delete any partial
+      // output so it can't surface as a corrupt track (C7), and surface the
+      // error to the caller instead of a silent null (C1). Leftover buffer
+      // segments are cleaned by the caller's startBuffering/closeAndDeleteAll.
+      if (outPath != null) _deleteFileQuietly(File(outPath));
+      return (path: null, error: e);
     }
   }
 

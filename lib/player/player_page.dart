@@ -309,7 +309,7 @@ class _PlayerPageState extends State<PlayerPage>
       if (buffering) {
         await _recorder.startBuffering();
       } else {
-        await _recorder.onStreamStopped();
+        final result = await _recorder.onStreamStopped();
         if (mounted) {
           setState(() {
             _recording = false;
@@ -317,6 +317,11 @@ class _PlayerPageState extends State<PlayerPage>
           });
         }
         _publishRadio(); // clear "recording" from the card
+        if (result.path != null) {
+          _snack('Saved recording: ${_baseName(result.path!)}');
+        } else if (result.error != null) {
+          _snack('Recording failed: ${result.error}');
+        }
       }
       // A title-less station only streams its (second) audio connection when
       // buffering is on, so restart the reader to match the new flag.
@@ -585,9 +590,13 @@ class _PlayerPageState extends State<PlayerPage>
     await _icy.stop();
     // Switching station ends any in-progress recording (spec: a station change
     // stops recording) — finalize it before we retune.
-    final saved = await _recorder.onStreamStopped();
+    final result = await _recorder.onStreamStopped();
     if (session != _playSession) return; // superseded while finalizing
-    if (saved != null) _snack('Saved recording: ${_baseName(saved)}');
+    if (result.path != null) {
+      _snack('Saved recording: ${_baseName(result.path!)}');
+    } else if (result.error != null) {
+      _snack('Recording failed: ${result.error}');
+    }
     try {
       await _player.setUrl(station.url);
       // Don't await play(): for an endless radio stream just_audio's play()
@@ -693,7 +702,7 @@ class _PlayerPageState extends State<PlayerPage>
     _playSession++; // invalidate any in-flight _play / metadata callbacks
     await _player.stop();
     await _icy.stop();
-    final saved = await _recorder.onStreamStopped();
+    final result = await _recorder.onStreamStopped();
     // Drop mute and restore the real volume so the next station isn't silent.
     if (_muted) await _player.setVolume(_volume);
     setState(() {
@@ -710,7 +719,11 @@ class _PlayerPageState extends State<PlayerPage>
     });
     // Nothing playing now ⇒ tear the media session down.
     audioHandler.detach(this);
-    if (saved != null) _snack('Saved recording: ${_baseName(saved)}');
+    if (result.path != null) {
+      _snack('Saved recording: ${_baseName(result.path!)}');
+    } else if (result.error != null) {
+      _snack('Recording failed: ${result.error}');
+    }
   }
 
   /// Non-destructive pause for live radio, from the media session / Bluetooth /
@@ -746,16 +759,22 @@ class _PlayerPageState extends State<PlayerPage>
       _publishRadio();
       return;
     }
-    final saved = await _recorder.onTrackChanged();
-    if (saved != null && mounted) {
-      setState(() {
+    final result = await _recorder.onTrackChanged();
+    // A finished (path) or failed (error) recording both end the recording
+    // state — clear the red glow either way, else it persists indefinitely.
+    if (result.path != null || result.error != null) {
+      if (mounted) {
+        setState(() {
+          _recording = false;
+          _manualRecording = false;
+        });
+      } else {
         _recording = false;
         _manualRecording = false;
-      });
-      _snack('Saved recording: ${_baseName(saved)}');
-    } else if (saved != null) {
-      _recording = false;
-      _manualRecording = false;
+      }
+      _snack(result.path != null
+          ? 'Saved recording: ${_baseName(result.path!)}'
+          : 'Recording failed: ${result.error}');
     }
     // Refresh the card for the new track / cleared recording state.
     _publishRadio();
@@ -818,7 +837,7 @@ class _PlayerPageState extends State<PlayerPage>
 
   /// Finalize a manual (title-less) recording and start a fresh buffer.
   Future<void> _saveManualRecording() async {
-    final saved = await _recorder.onTrackChanged(); // finalize + fresh buffer
+    final result = await _recorder.onTrackChanged(); // finalize + fresh buffer
     if (mounted) {
       setState(() {
         _recording = false;
@@ -826,8 +845,10 @@ class _PlayerPageState extends State<PlayerPage>
       });
     }
     _publishRadio();
-    if (saved != null) {
-      _snack('Saved recording: ${_baseName(saved)}');
+    if (result.path != null) {
+      _snack('Saved recording: ${_baseName(result.path!)}');
+    } else if (result.error != null) {
+      _snack('Recording failed: ${result.error}');
     } else {
       _snack('Nothing recorded yet.');
     }

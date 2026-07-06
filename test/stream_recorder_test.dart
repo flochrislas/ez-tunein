@@ -96,7 +96,7 @@ void main() {
           List.filled(150, 1)); // pre-arm audio (within cap, not dropped)
       r.arm('Artist - Song', 'Station', 'audio/mpeg');
       feed(r, 500, tag: 2); // post-arm audio, spans several segments
-      final path = await r.onTrackChanged();
+      final path = (await r.onTrackChanged()).path;
 
       expect(path, isNotNull);
       expect(path, endsWith('.mp3'));
@@ -118,7 +118,7 @@ void main() {
       // Keep only the last 100 bytes of lead-in, then record 200 more.
       r.arm('A - B', 'S', 'audio/mpeg', leadInBytes: 100);
       feed(r, 200, tag: 2);
-      final path = await r.onStreamStopped();
+      final path = (await r.onStreamStopped()).path;
 
       expect(path, isNotNull);
       final bytes = File(path!).readAsBytesSync();
@@ -132,7 +132,7 @@ void main() {
       feed(r, 500, tag: 1); // pre-arm audio — should be excluded entirely
       r.arm('A - B', 'S', 'audio/mpeg', leadInBytes: 0);
       feed(r, 200, tag: 2);
-      final path = await r.onStreamStopped();
+      final path = (await r.onStreamStopped()).path;
       final bytes = File(path!).readAsBytesSync();
       expect(bytes, hasLength(200));
       expect(bytes, everyElement(2));
@@ -143,7 +143,7 @@ void main() {
       feed(r, 300, tag: 5); // pre-arm (within cap ⇒ retained)
       r.arm('A - B', 'S', 'audio/mpeg'); // leadInBytes: null ⇒ whole buffer
       feed(r, 200, tag: 6);
-      final path = await r.onStreamStopped();
+      final path = (await r.onStreamStopped()).path;
       final bytes = File(path!).readAsBytesSync();
       expect(bytes, hasLength(500));
       expect(bytes.sublist(0, 300), everyElement(5));
@@ -154,7 +154,7 @@ void main() {
       await r.startBuffering();
       r.arm('A - B', 'S', 'audio/mpeg');
       r.addAudio(List.filled(100, 7)); // < segment size ⇒ one segment
-      final path = await r.onStreamStopped();
+      final path = (await r.onStreamStopped()).path;
       expect(path, isNotNull);
       expect(File(path!).readAsBytesSync(), hasLength(100));
     });
@@ -181,10 +181,27 @@ void main() {
       final p2 = await f2;
       // Exactly one produced the recording (the first); the other is a clean
       // no-op (nothing armed by then) — never partial/duplicate output.
-      final paths = [p1, p2].whereType<String>().toList();
+      final paths = [p1.path, p2.path].whereType<String>().toList();
       expect(paths, hasLength(1));
       expect(File(paths.single).readAsBytesSync(), hasLength(300));
       expect(r.bufferedBytes, 0); // torn down last
+    });
+
+    test('a failed finalize surfaces the error and leaves no output (C1/C7)',
+        () async {
+      // Make the output resolver throw so finalize fails deterministically.
+      r.outputDirResolver = () async => throw const FileSystemException('boom');
+      await r.startBuffering();
+      r.arm('A - B', 'S', 'audio/mpeg');
+      r.addAudio(List.filled(100, 1));
+      final result = await r.onStreamStopped();
+      // C1: the failure is reported (not a silent null that reads as "nothing").
+      expect(result.path, isNull);
+      expect(result.error, isNotNull);
+      // C7: no partial/corrupt file left behind in the output folder.
+      final leftovers =
+          out.listSync().where((e) => e.path.endsWith('.mp3')).toList();
+      expect(leftovers, isEmpty);
     });
 
     test('rapid startBuffering / onStreamStopped sequences cleanly', () async {
