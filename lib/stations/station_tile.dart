@@ -1,8 +1,12 @@
 import 'package:flutter/material.dart';
 
 import '../models/station.dart';
+import '../storage_paths.dart';
 
-/// A station row that reveals a delete button only while hovered.
+/// A station row with edit/remove actions. On desktop they reveal only while
+/// the row is hovered; on touch they live behind a trailing overflow menu (⋮),
+/// matching the recordings list — touch never hovers, so hover-only actions
+/// would be unreachable.
 class StationTile extends StatefulWidget {
   const StationTile({
     super.key,
@@ -46,24 +50,58 @@ class _StationTileState extends State<StationTile> {
         ),
         selected: widget.isCurrent,
         onTap: widget.onTap,
-        trailing: _hovered
-            ? Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  IconButton(
-                    icon: const Icon(Icons.edit_outlined),
-                    tooltip: 'Edit station',
-                    onPressed: widget.onEdit,
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.delete_outline),
-                    tooltip: 'Remove station',
-                    onPressed: widget.onDelete,
-                  ),
-                ],
-              )
-            : null,
+        trailing: isDesktop ? _hoverActions() : _overflowMenu(),
       ),
+    );
+  }
+
+  /// Desktop: edit + delete buttons, shown only while the row is hovered.
+  Widget? _hoverActions() {
+    if (!_hovered) return null;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        IconButton(
+          icon: const Icon(Icons.edit_outlined),
+          tooltip: 'Edit station',
+          onPressed: widget.onEdit,
+        ),
+        IconButton(
+          icon: const Icon(Icons.delete_outline),
+          tooltip: 'Remove station',
+          onPressed: widget.onDelete,
+        ),
+      ],
+    );
+  }
+
+  /// Touch: an always-visible overflow menu (touch never hovers).
+  Widget _overflowMenu() {
+    return PopupMenuButton<String>(
+      tooltip: 'More',
+      icon: const Icon(Icons.more_vert),
+      onSelected: (v) {
+        if (v == 'edit') widget.onEdit();
+        if (v == 'remove') widget.onDelete();
+      },
+      itemBuilder: (ctx) => [
+        const PopupMenuItem(
+          value: 'edit',
+          child: ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.edit_outlined),
+            title: Text('Edit station'),
+          ),
+        ),
+        const PopupMenuItem(
+          value: 'remove',
+          child: ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.delete_outline),
+            title: Text('Remove station'),
+          ),
+        ),
+      ],
     );
   }
 }
