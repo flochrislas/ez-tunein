@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models/station.dart';
 import '../settings/color_swatch.dart';
+import '../url_utils.dart';
 
 /// A minimal dialog that collects a station name + stream URL. Pass [initial]
 /// to pre-fill it for editing an existing station; omit it to add a new one.
@@ -20,6 +21,7 @@ class _StationDialogState extends State<StationDialog> {
   late Color? _color = widget.initial?.color != null
       ? Color(widget.initial!.color!)
       : null; // null ⇒ default theme colour
+  String? _urlError; // inline error when the URL isn't a valid http(s) stream
 
   @override
   void dispose() {
@@ -32,6 +34,12 @@ class _StationDialogState extends State<StationDialog> {
     final name = _name.text.trim();
     final url = _url.text.trim();
     if (name.isEmpty || url.isEmpty) return;
+    // Reject anything that isn't an http(s) stream URL — otherwise file://,
+    // concat:, etc. would reach the player (S2). Playlist links only warn.
+    if (!isValidStreamUrl(url)) {
+      setState(() => _urlError = 'Enter an http:// or https:// stream URL.');
+      return;
+    }
     Navigator.of(context).pop(Station(name, url, color: _color?.toARGB32()));
   }
 
@@ -82,9 +90,17 @@ class _StationDialogState extends State<StationDialog> {
             ),
             TextField(
               controller: _url,
-              decoration: const InputDecoration(
+              // Clear the error while editing; also refreshes the playlist hint.
+              onChanged: (_) => setState(() => _urlError = null),
+              decoration: InputDecoration(
                 labelText: 'Stream URL',
                 hintText: 'https://…',
+                errorText: _urlError,
+                helperText: isPlaylistUrl(_url.text.trim())
+                    ? 'Looks like a playlist (.pls/.m3u) — use the direct '
+                        'stream URL if it won\'t play.'
+                    : null,
+                helperMaxLines: 2,
               ),
               keyboardType: TextInputType.url,
               onSubmitted: (_) => _submit(),

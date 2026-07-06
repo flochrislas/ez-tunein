@@ -23,6 +23,7 @@ import '../storage_paths.dart';
 import '../stream_recorder.dart';
 import '../track_utils.dart';
 import '../tracks/track_list_page.dart';
+import '../url_utils.dart';
 
 // The list users start with on first launch; afterwards it's whatever they've
 // saved (see stationsKey). Add/remove from the UI.
@@ -430,6 +431,8 @@ class _PlayerPageState extends State<PlayerPage>
     final seen = _stations.map((s) => s.url).toSet();
     final toAdd = <Station>[];
     var skipped = 0;
+    var invalid = 0; // rows dropped for a non-http(s) URL (S2)
+    var playlist = 0; // imported rows whose URL looks like a playlist wrapper
     for (final r in parseCsv(content)) {
       if (r.length < 2) continue;
       final name = r[0].trim();
@@ -437,23 +440,42 @@ class _PlayerPageState extends State<PlayerPage>
       if (name.isEmpty || url.isEmpty) continue;
       // Tolerate a header row written by our own export (or by hand).
       if (name.toLowerCase() == 'name' && url.toLowerCase() == 'url') continue;
+      // Reject anything that isn't an http(s) stream URL (file://, etc.).
+      if (!isValidStreamUrl(url)) {
+        invalid++;
+        continue;
+      }
       if (!seen.add(url)) {
         skipped++; // duplicate within the file or already in the list
         continue;
       }
+      if (isPlaylistUrl(url)) playlist++;
       toAdd.add(Station(name, url));
     }
 
     if (toAdd.isEmpty) {
-      _snack(skipped > 0
-          ? 'Nothing to import — those $skipped station(s) are already in your list.'
+      final reasons = <String>[
+        if (skipped > 0) '$skipped already present',
+        if (invalid > 0) '$invalid skipped — not http/https',
+      ];
+      _snack(reasons.isNotEmpty
+          ? 'Nothing to import — ${reasons.join(', ')}.'
           : 'No stations found in that file.');
       return;
     }
     setState(() => _stations.addAll(toAdd));
     await _saveStations();
-    _snack('Imported ${toAdd.length} station(s)'
-        '${skipped > 0 ? ' ($skipped already present)' : ''}.');
+    final notes = <String>[
+      if (skipped > 0) '$skipped already present',
+      if (invalid > 0) '$invalid skipped — not http/https',
+    ];
+    var msg = 'Imported ${toAdd.length} station(s)'
+        '${notes.isEmpty ? '' : ' (${notes.join(', ')})'}.';
+    if (playlist > 0) {
+      msg += ' $playlist may be playlist links — use direct stream URLs if '
+          'they don\'t play.';
+    }
+    _snack(msg);
   }
 
   /// Export the current station list to a user-chosen CSV file (`name,url`,

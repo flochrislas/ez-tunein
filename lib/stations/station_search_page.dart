@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models/station.dart';
 import '../radio_browser.dart';
+import '../url_utils.dart';
 import 'station_dialog.dart';
 
 /// Online station search backed by the Radio Browser API. Lets the user type a
@@ -75,6 +76,9 @@ class _StationSearchPageState extends State<StationSearchPage> {
   void _submitSelection() {
     final chosen = _results
         .where((r) => _selected.contains(r.streamUrl))
+        // Defence in depth: the directory's url_resolved is otherwise trusted
+        // verbatim, so drop anything that isn't an http(s) URL (S2).
+        .where((r) => isValidStreamUrl(r.streamUrl))
         .map((r) => Station(r.name, r.streamUrl))
         .toList();
     Navigator.of(context).pop(chosen);
