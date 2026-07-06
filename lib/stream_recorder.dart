@@ -61,7 +61,6 @@ class StreamRecorder {
   // Logical offset from which an armed recording should be saved (a lead-in cap
   // moves it forward; the default is the oldest retained byte = whole buffer).
   int _recordStartOffset = 0;
-  bool _swept = false; // cleaned crash-leftover segment files once?
   bool _armed = false;
   String _title = '';
   String _station = '';
@@ -71,6 +70,10 @@ class StreamRecorder {
 
   /// Total bytes currently buffered across all segments. Exposed for tests.
   int get bufferedBytes => _totalBytes;
+
+  /// The private per-process directory holding the buffer segments (or null
+  /// before the first [startBuffering] / after [dispose]). Exposed for tests.
+  Directory? get bufferDir => _tmpDir;
 
   static const _segmentFilePrefix = 'ez_record_buffer.';
 
@@ -103,10 +106,11 @@ class StreamRecorder {
     if (!bufferingEnabled) return;
     _armed = false;
     await _closeAndDeleteAll();
-    _tmpDir ??= await bufferDirResolver();
-    if (!_swept) {
-      _sweepStaleSegments(); // remove any leftovers from a crashed session
-      _swept = true;
+    if (_tmpDir == null || !_tmpDir!.existsSync()) {
+      // Private per-process dir (createTemp ⇒ unpredictable name, 0700 on POSIX):
+      // no symlink pre-creation in shared /tmp (S3), no cross-instance collision
+      // (C6). Lives inside the (injectable) base temp dir.
+      _tmpDir = await (await bufferDirResolver()).createTemp('ez_tunein_');
     }
     _segSeq = 0;
     _totalBytes = 0;
@@ -214,7 +218,10 @@ class StreamRecorder {
         return result;
       });
 
-  Future<void> dispose() => _runExclusive(_closeAndDeleteAll);
+  Future<void> dispose() => _runExclusive(() async {
+        await _closeAndDeleteAll();
+        await _removeTmpDir(); // drop the private per-process dir
+      });
 
   Future<FinalizeResult> _finalizeIfArmed() async {
     if (!_armed) return (path: null, error: null);
@@ -309,18 +316,13 @@ class StreamRecorder {
     } catch (_) {}
   }
 
-  /// Remove buffer segment files left over from a previous (crashed) session.
-  void _sweepStaleSegments() {
+  /// Remove the private per-process buffer dir (on dispose). Best-effort.
+  Future<void> _removeTmpDir() async {
     final dir = _tmpDir;
+    _tmpDir = null;
     if (dir == null) return;
     try {
-      for (final e in dir.listSync(followLinks: false)) {
-        if (e is File &&
-            e.uri.pathSegments.last.startsWith(_segmentFilePrefix) &&
-            e.path.endsWith('.part')) {
-          _deleteFileQuietly(e);
-        }
-      }
+      if (await dir.exists()) await dir.delete(recursive: true);
     } catch (_) {}
   }
 

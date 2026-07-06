@@ -542,6 +542,9 @@ class _PlayerPageState extends State<PlayerPage>
     _closing = true;
     try {
       await _stop();
+      // exit(0) skips State.dispose, so drop the recorder's private temp dir
+      // here rather than leaking it on every desktop close (S3/C6).
+      await _recorder.dispose();
     } catch (_) {}
     exit(0);
   }

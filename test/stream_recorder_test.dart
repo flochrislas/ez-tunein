@@ -86,7 +86,7 @@ void main() {
       expect(r.bufferedBytes, lessThan(1000 + 200));
       // Old segment files were deleted, not left to accumulate.
       final parts =
-          buf.listSync().where((e) => e.path.endsWith('.part')).length;
+          r.bufferDir!.listSync().where((e) => e.path.endsWith('.part')).length;
       expect(parts, lessThanOrEqualTo(1000 ~/ 200 + 2));
     });
 
@@ -108,7 +108,7 @@ void main() {
       // recording's segments aren't left lying around.
       expect(r.bufferedBytes, 0);
       final parts =
-          buf.listSync().where((e) => e.path.endsWith('.part')).length;
+          r.bufferDir!.listSync().where((e) => e.path.endsWith('.part')).length;
       expect(parts, 1); // just the new active segment
     });
 
@@ -229,6 +229,68 @@ void main() {
       final armed = await r.arm('A - B', 'S', 'audio/mpeg');
       expect(armed, isFalse); // signals failure so the UI won't stick
       expect(r.isRecording, isFalse);
+    });
+
+    test(
+        'segments live in a private per-process subdir, not the shared base '
+        '(S3/C6)', () async {
+      await r.startBuffering();
+      r.addAudio(List.filled(100, 1));
+      // No segment files sit directly in the shared base dir…
+      final baseParts =
+          buf.listSync().where((e) => e.path.endsWith('.part')).toList();
+      expect(baseParts, isEmpty);
+      // …instead the base holds exactly one private ez_tunein_* subdir…
+      final subdirs = buf
+          .listSync()
+          .whereType<Directory>()
+          .where((d) => d.path
+              .split(Platform.pathSeparator)
+              .last
+              .startsWith('ez_tunein_'))
+          .toList();
+      expect(subdirs, hasLength(1));
+      expect(r.bufferDir!.path, subdirs.single.path);
+      // …and the .part files are inside it.
+      expect(
+        r.bufferDir!.listSync().where((e) => e.path.endsWith('.part')),
+        isNotEmpty,
+      );
+    });
+
+    test(
+        'two recorders sharing a base dir get separate dirs (no collision, C6)',
+        () async {
+      final r2 = StreamRecorder()
+        ..bufferingEnabled = true
+        ..bufferCapBytes = 1000
+        ..segmentBytesOverride = 200
+        ..bufferDirResolver = (() async => buf)
+        ..outputDirResolver = (() async => out);
+      await r.startBuffering();
+      await r2.startBuffering();
+      // Distinct private dirs ⇒ neither truncates or sweeps the other's buffer.
+      expect(r.bufferDir!.path, isNot(r2.bufferDir!.path));
+
+      await r.arm('A - B', 'S', 'audio/mpeg');
+      r.addAudio(List.filled(120, 1));
+      await r2.arm('C - D', 'S', 'audio/mpeg');
+      r2.addAudio(List.filled(80, 2));
+      final p1 = (await r.onStreamStopped()).path;
+      final p2 = (await r2.onStreamStopped()).path;
+      expect(File(p1!).readAsBytesSync(), hasLength(120));
+      expect(File(p2!).readAsBytesSync(), hasLength(80));
+      await r2.dispose();
+    });
+
+    test('dispose removes the private per-process dir', () async {
+      await r.startBuffering();
+      r.addAudio(List.filled(50, 1));
+      final dir = r.bufferDir!;
+      expect(dir.existsSync(), isTrue);
+      await r.dispose();
+      expect(dir.existsSync(), isFalse);
+      expect(r.bufferDir, isNull);
     });
 
     test('rapid startBuffering / onStreamStopped sequences cleanly', () async {
