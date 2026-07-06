@@ -638,11 +638,22 @@ class _PlayerPageState extends State<PlayerPage>
       bufferWithoutMetadata: _recBuffering,
       onTitle: (title) {
         if (session != _playSession || !mounted) return;
-        setState(() {
-          _nowPlaying = title;
-          _metaStatus = MetadataStatus.active;
-          _trackInfoFresh = true; // live title ⇒ Save/Record are meaningful
-        });
+        // The reader re-emits the same title every icy-metaint bytes
+        // (~1–2.5×/sec). Rebuild only on a real change or on recovery from a
+        // non-active status — otherwise we rebuild the whole page for nothing
+        // (P1). History + track-change still run each tick (they dedup);
+        // _recordHistory must, so re-enabling history mid-song still logs the
+        // current track.
+        final unchanged = title == _nowPlaying &&
+            _trackInfoFresh &&
+            _metaStatus == MetadataStatus.active;
+        if (!unchanged) {
+          setState(() {
+            _nowPlaying = title;
+            _metaStatus = MetadataStatus.active;
+            _trackInfoFresh = true; // live title ⇒ Save/Record are meaningful
+          });
+        }
         _recordHistory(title);
         _handleTrackChange(title);
       },
