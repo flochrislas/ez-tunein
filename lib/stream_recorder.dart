@@ -172,18 +172,27 @@ class StreamRecorder {
   /// means "the whole buffer" (used for titled recordings, where the buffer was
   /// reset at the song's start anyway). The cap can't reach past what's still
   /// retained in the ring buffer.
-  void arm(String title, String station, String? contentType,
-      {int? leadInBytes}) {
-    if (!bufferingEnabled || _raf == null) return;
-    _armed = true;
-    _title = title;
-    _station = station;
-    _ext = extForContentType(contentType);
-    final earliest = _segments.isEmpty ? 0 : _segments.first.startOffset;
-    _recordStartOffset = leadInBytes == null
-        ? earliest
-        : (_writtenBytes - leadInBytes).clamp(earliest, _writtenBytes);
-  }
+  ///
+  /// Queued through [_runExclusive] so a tap landing during an in-flight
+  /// finalize/startBuffering (e.g. right at a track change) *waits* for the fresh
+  /// buffer and arms it, instead of silently no-opping while `_raf` is null
+  /// (C2). Returns true if arming succeeded; false when buffering is off or the
+  /// buffer is gone (e.g. the stream was stopped) — the caller uses this to only
+  /// show the UI as recording on genuine success.
+  Future<bool> arm(String title, String station, String? contentType,
+          {int? leadInBytes}) =>
+      _runExclusive(() async {
+        if (!bufferingEnabled || _raf == null) return false;
+        _armed = true;
+        _title = title;
+        _station = station;
+        _ext = extForContentType(contentType);
+        final earliest = _segments.isEmpty ? 0 : _segments.first.startOffset;
+        _recordStartOffset = leadInBytes == null
+            ? earliest
+            : (_writtenBytes - leadInBytes).clamp(earliest, _writtenBytes);
+        return true;
+      });
 
   /// Discard an in-progress recording but keep buffering the same track (so the
   /// user can re-arm). The cap applies again once disarmed.

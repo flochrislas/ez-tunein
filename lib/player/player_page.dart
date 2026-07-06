@@ -205,6 +205,9 @@ class _PlayerPageState extends State<PlayerPage>
   // True when the in-progress recording is user-bounded (a title-less station,
   // so there's no track change to auto-save on — the user taps again to save).
   bool _manualRecording = false;
+  // True while an arm() call is awaiting the recorder's op queue; drops the
+  // double-tap that would otherwise queue a second arm (C2).
+  bool _arming = false;
   bool _recBuffering = true; // mirrors recBufferingKey; gates the Record button
   int _recLeadSeconds = recLeadSecondsDefault; // mirrors recLeadSecondsKey
   String _lastRecTitle = '';
@@ -789,7 +792,7 @@ class _PlayerPageState extends State<PlayerPage>
       (_trackInfoFresh || _metaStatus == MetadataStatus.unsupported);
 
   /// Arm recording, or finish/cancel an in-progress one.
-  void _toggleRecord() {
+  Future<void> _toggleRecord() async {
     if (_recording) {
       if (_manualRecording) {
         // No upcoming track change to auto-save on — this tap is the save.
@@ -806,6 +809,8 @@ class _PlayerPageState extends State<PlayerPage>
       _snack('Start a station first.');
       return;
     }
+    // A prior arm is still resolving — ignore the double-tap.
+    if (_arming) return;
     // Title-less station ⇒ user-bounded ("manual") recording, named after the
     // station + a timestamp since there's no Artist - Title.
     final manual = !_trackInfoFresh;
@@ -823,8 +828,20 @@ class _PlayerPageState extends State<PlayerPage>
       leadInBytes =
           kbps * 125 * _recLeadSeconds; // kbps*1000/8 bytes per second
     }
-    _recorder.arm(recName, _current!.name, _icy.contentType,
+    // arm() is queued through the recorder's op lock, so a tap landing during an
+    // in-flight finalize/startBuffering (e.g. right at a track change) waits for
+    // the fresh buffer and arms it rather than silently no-opping (C2). Only mark
+    // the UI as recording once arming actually succeeded, else the red state
+    // would stick with nothing recorded.
+    _arming = true;
+    final armed = await _recorder.arm(recName, _current!.name, _icy.contentType,
         leadInBytes: leadInBytes);
+    _arming = false;
+    if (!mounted) return;
+    if (!armed) {
+      _snack('Couldn\'t start recording — try again.');
+      return;
+    }
     setState(() {
       _recording = true;
       _manualRecording = manual;

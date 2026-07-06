@@ -94,7 +94,7 @@ void main() {
       await r.startBuffering();
       r.addAudio(
           List.filled(150, 1)); // pre-arm audio (within cap, not dropped)
-      r.arm('Artist - Song', 'Station', 'audio/mpeg');
+      await r.arm('Artist - Song', 'Station', 'audio/mpeg');
       feed(r, 500, tag: 2); // post-arm audio, spans several segments
       final path = (await r.onTrackChanged()).path;
 
@@ -116,7 +116,7 @@ void main() {
       await r.startBuffering();
       feed(r, 600, tag: 1); // pre-arm audio (within the 1000-byte cap)
       // Keep only the last 100 bytes of lead-in, then record 200 more.
-      r.arm('A - B', 'S', 'audio/mpeg', leadInBytes: 100);
+      await r.arm('A - B', 'S', 'audio/mpeg', leadInBytes: 100);
       feed(r, 200, tag: 2);
       final path = (await r.onStreamStopped()).path;
 
@@ -130,7 +130,7 @@ void main() {
     test('lead-in cap of zero records only from the tap', () async {
       await r.startBuffering();
       feed(r, 500, tag: 1); // pre-arm audio — should be excluded entirely
-      r.arm('A - B', 'S', 'audio/mpeg', leadInBytes: 0);
+      await r.arm('A - B', 'S', 'audio/mpeg', leadInBytes: 0);
       feed(r, 200, tag: 2);
       final path = (await r.onStreamStopped()).path;
       final bytes = File(path!).readAsBytesSync();
@@ -141,7 +141,8 @@ void main() {
     test('null lead-in keeps the whole buffered song', () async {
       await r.startBuffering();
       feed(r, 300, tag: 5); // pre-arm (within cap ⇒ retained)
-      r.arm('A - B', 'S', 'audio/mpeg'); // leadInBytes: null ⇒ whole buffer
+      await r.arm(
+          'A - B', 'S', 'audio/mpeg'); // leadInBytes: null ⇒ whole buffer
       feed(r, 200, tag: 6);
       final path = (await r.onStreamStopped()).path;
       final bytes = File(path!).readAsBytesSync();
@@ -152,7 +153,7 @@ void main() {
 
     test('single-segment recording takes the rename fast path', () async {
       await r.startBuffering();
-      r.arm('A - B', 'S', 'audio/mpeg');
+      await r.arm('A - B', 'S', 'audio/mpeg');
       r.addAudio(List.filled(100, 7)); // < segment size ⇒ one segment
       final path = (await r.onStreamStopped()).path;
       expect(path, isNotNull);
@@ -161,7 +162,7 @@ void main() {
 
     test('cancel disarms and the cap applies again', () async {
       await r.startBuffering();
-      r.arm('A - B', 'S', null);
+      await r.arm('A - B', 'S', null);
       feed(r, 2000, tag: 3); // armed ⇒ grows past cap
       expect(r.bufferedBytes, greaterThan(1000));
       r.cancel();
@@ -172,7 +173,7 @@ void main() {
     test('overlapping finalize ops are serialized into one valid recording',
         () async {
       await r.startBuffering();
-      r.arm('A - B', 'S', 'audio/mpeg');
+      await r.arm('A - B', 'S', 'audio/mpeg');
       r.addAudio(List.filled(300, 9));
       // Fire both without awaiting — they must serialize, not corrupt segments.
       final f1 = r.onTrackChanged();
@@ -192,7 +193,7 @@ void main() {
       // Make the output resolver throw so finalize fails deterministically.
       r.outputDirResolver = () async => throw const FileSystemException('boom');
       await r.startBuffering();
-      r.arm('A - B', 'S', 'audio/mpeg');
+      await r.arm('A - B', 'S', 'audio/mpeg');
       r.addAudio(List.filled(100, 1));
       final result = await r.onStreamStopped();
       // C1: the failure is reported (not a silent null that reads as "nothing").
@@ -202,6 +203,32 @@ void main() {
       final leftovers =
           out.listSync().where((e) => e.path.endsWith('.mp3')).toList();
       expect(leftovers, isEmpty);
+    });
+
+    test('arm queued during an in-flight op still records (C2)', () async {
+      await r.startBuffering();
+      r.addAudio(List.filled(100, 1)); // pre-op audio (wiped by startBuffering)
+      // Fire a track-change (finalize-less here + startBuffering) WITHOUT
+      // awaiting, then arm before it resolves. arm must wait for the fresh
+      // buffer and succeed, not silently no-op while _raf is momentarily null.
+      final tc = r.onTrackChanged();
+      final armed = await r.arm('A - B', 'S', 'audio/mpeg'); // queued behind tc
+      await tc;
+      expect(armed, isTrue);
+      expect(r.isRecording, isTrue);
+      r.addAudio(List.filled(50, 2)); // post-arm audio on the fresh buffer
+      final path = (await r.onStreamStopped()).path;
+      expect(path, isNotNull);
+      // Only the post-arm bytes on the fresh buffer — the pre-op 100 were wiped.
+      expect(File(path!).readAsBytesSync(), hasLength(50));
+    });
+
+    test('arm returns false when the buffer is gone (C2 safe no-op)', () async {
+      await r.startBuffering();
+      await r.onStreamStopped(); // tears the buffer down (_raf is null)
+      final armed = await r.arm('A - B', 'S', 'audio/mpeg');
+      expect(armed, isFalse); // signals failure so the UI won't stick
+      expect(r.isRecording, isFalse);
     });
 
     test('rapid startBuffering / onStreamStopped sequences cleanly', () async {
