@@ -5,17 +5,15 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:just_audio/just_audio.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../app_prefs.dart';
-import '../audio_handler.dart';
 import '../csv_export.dart';
 import '../csv_utils.dart';
-import '../icy_reader.dart';
 import '../log.dart';
 import '../models/station.dart';
+import '../radio_session.dart';
 import '../recordings/recordings_page.dart';
 import '../settings/settings_page.dart';
 import '../stations/default_stations.dart';
@@ -24,8 +22,6 @@ import '../stations/station_merge.dart';
 import '../stations/station_search_page.dart';
 import '../stations/station_tile.dart';
 import '../storage_paths.dart';
-import '../stream_recorder.dart';
-import '../track_utils.dart';
 import '../tracks/track_list_page.dart';
 import '../url_utils.dart';
 
@@ -36,57 +32,17 @@ class PlayerPage extends StatefulWidget {
   State<PlayerPage> createState() => _PlayerPageState();
 }
 
-class _PlayerPageState extends State<PlayerPage>
-    with WindowListener
-    implements AudioModeDriver {
-  final _player = AudioPlayer();
-  final _icy = IcyReader();
-  Timer? _resizeDebounce;
+/// The radio player screen. The audio/metadata/recording work lives in
+/// [RadioSession]; this State owns only the UI — the station list, the
+/// type-to-search filter, window handling, snackbars, and the build.
+class _PlayerPageState extends State<PlayerPage> with WindowListener {
+  // The audio session (player + ICY metadata + recorder). Rebuilds this widget
+  // via _onSessionChanged; user-facing messages come back through onMessage.
+  final _session = RadioSession();
 
+  Timer? _resizeDebounce;
   SharedPreferences? _prefs;
   List<Station> _stations = List.of(defaultStations);
-  Station? _current;
-  // True while the stream is paused from the media session/Bluetooth: audio is
-  // stopped but the metadata/recording socket stays alive (non-destructive).
-  bool _paused = false;
-  bool _loading = false;
-  // True when the radio player has errored (mid-stream drop, decode failure, a
-  // failed play()). Surfaces "Stream lost" instead of the fake "playing" the ICY
-  // auto-reconnect would otherwise mask (C3). Cleared on a fresh _play/_stop.
-  bool _streamError = false;
-  StreamSubscription<PlaybackEvent>?
-      _playbackSub; // radio player error listener
-  String _nowPlaying = ''; // raw "Artist - Title" string from the stream
-  // State of the ICY metadata side-channel; drives the now-playing message when
-  // there's no title yet (connecting / unsupported / failed / waiting).
-  MetadataStatus _metaStatus = MetadataStatus.idle;
-  // Whether the displayed title reflects a *live* metadata feed (status active).
-  // Gates Save/Record so a stale title (feed dropped after a first title) can't
-  // be saved/recorded; the title itself may still be shown (as "last: …").
-  bool _trackInfoFresh = false;
-  // Monotonic play-session id: bumped on every _play so late async work from a
-  // superseded station (a fast switch) can't update the UI / history / recording.
-  int _playSession = 0;
-  double _volume = 1.0; // 0.0–1.0
-  bool _muted =
-      false; // quick-silence while staying connected (see _toggleMute)
-  // Last title written to the play history; the ICY reader re-emits the same
-  // title every metadata tick, so we dedup against this to log a song once.
-  String _lastHistoryTitle = '';
-
-  // Stream recorder + UI state. The ICY reader re-emits the same title each tick,
-  // so track-change handling dedups against _lastRecTitle (mirrors history).
-  final _recorder = StreamRecorder();
-  bool _recording = false;
-  // True when the in-progress recording is user-bounded (a title-less station,
-  // so there's no track change to auto-save on — the user taps again to save).
-  bool _manualRecording = false;
-  // True while an arm() call is awaiting the recorder's op queue; drops the
-  // double-tap that would otherwise queue a second arm (C2).
-  bool _arming = false;
-  bool _recBuffering = true; // mirrors recBufferingKey; gates the Record button
-  int _recLeadSeconds = recLeadSecondsDefault; // mirrors recLeadSecondsKey
-  String _lastRecTitle = '';
 
   // Type-to-search filter over station names. On desktop, typing a printable
   // character while the page is focused opens the search bar; on mobile the
@@ -108,17 +64,15 @@ class _PlayerPageState extends State<PlayerPage>
       // shutdown and segfaults. See onWindowClose.
       unawaited(windowManager.setPreventClose(true));
     }
-    // ICY callbacks are wired per-station in _play (with a session guard); see
-    // there. Just the output-folder resolver + the versioned User-Agent here.
-    _recorder.outputDirResolver = _resolveOutputDir;
-    _icy.userAgent = appUserAgent;
-    // Observe the radio player so a mid-stream failure surfaces instead of the
-    // UI (and the auto-reconnecting ICY feed) pretending it's still playing (C3).
-    _playbackSub = _player.playbackEventStream.listen(
-      (_) {},
-      onError: (Object e, StackTrace _) => _onPlayerError(e),
-    );
-    _restorePrefs();
+    _session.onMessage = _snack;
+    _session.addListener(_onSessionChanged);
+    unawaited(_session.init());
+    _restoreStations();
+  }
+
+  // Rebuild whenever the session's state changes.
+  void _onSessionChanged() {
+    if (mounted) setState(() {});
   }
 
   // Resize fires rapidly while dragging; debounce so we persist only the
@@ -133,93 +87,25 @@ class _PlayerPageState extends State<PlayerPage>
     });
   }
 
-  Future<void> _restorePrefs() async {
+  Future<void> _restoreStations() async {
     final prefs = await SharedPreferences.getInstance();
-    _prefs = prefs;
-
-    final savedVolume = prefs.getDouble(volumeKey);
-    if (savedVolume != null) await _player.setVolume(savedVolume);
-
-    // Recording config (defaults: buffering on, 35 MB, Downloads folder). Clamp
-    // to recBufferMbMax so an old saved value above the new cap is still bounded.
-    final buffering = prefs.getBool(recBufferingKey) ?? true;
-    final bufMb = (prefs.getInt(recBufferMbKey) ?? recBufferMbDefault)
-        .clamp(5, recBufferMbMax);
-    _recorder.bufferingEnabled = buffering;
-    _recorder.bufferCapBytes = bufMb * 1024 * 1024;
-    final leadSec = prefs.getInt(recLeadSecondsKey) ?? recLeadSecondsDefault;
-
-    List<Station>? loadedStations;
-    final savedStations = prefs.getString(stationsKey);
-    if (savedStations != null) {
+    List<Station>? loaded;
+    final saved = prefs.getString(stationsKey);
+    if (saved != null) {
       try {
-        loadedStations = (jsonDecode(savedStations) as List)
+        loaded = (jsonDecode(saved) as List)
             .map((e) => Station.fromJson(e as Map<String, dynamic>))
             .toList();
       } catch (e) {
-        loadedStations = null; // corrupt — fall back to defaults
-        logSwallowed('_restorePrefs stations decode', e);
+        loaded = null; // corrupt — fall back to defaults
+        logSwallowed('_restoreStations decode', e);
       }
     }
-
     if (!mounted) return;
     setState(() {
-      if (savedVolume != null) _volume = savedVolume;
-      if (loadedStations != null) _stations = loadedStations;
-      _recBuffering = buffering;
-      _recLeadSeconds = leadSec;
+      _prefs = prefs;
+      if (loaded != null) _stations = loaded;
     });
-  }
-
-  /// Folder recordings are written to (shared with the recordings library view).
-  Future<Directory> _resolveOutputDir() => recordingsDir();
-
-  /// Re-apply recording prefs after the settings view changes them, and reflect a
-  /// buffering on/off switch on the live stream.
-  Future<void> _applyRecordingPrefs() async {
-    final prefs = _prefs;
-    if (prefs == null) return;
-    final buffering = prefs.getBool(recBufferingKey) ?? true;
-    final bufMb = (prefs.getInt(recBufferMbKey) ?? recBufferMbDefault)
-        .clamp(5, recBufferMbMax);
-    final was = _recBuffering;
-    _recorder.bufferingEnabled = buffering;
-    _recorder.bufferCapBytes = bufMb * 1024 * 1024;
-    final leadSec = prefs.getInt(recLeadSecondsKey) ?? recLeadSecondsDefault;
-    if (mounted) {
-      setState(() {
-        _recBuffering = buffering;
-        _recLeadSeconds = leadSec;
-      });
-    }
-    if (_current != null && buffering != was) {
-      if (buffering) {
-        await _recorder.startBuffering();
-      } else {
-        final result = await _recorder.onStreamStopped();
-        if (mounted) {
-          setState(() {
-            _recording = false;
-            _manualRecording = false;
-          });
-        }
-        _publishRadio(); // clear "recording" from the card
-        if (result.path != null) {
-          _snack('Saved recording: ${_baseName(result.path!)}');
-        } else if (result.error != null) {
-          _snack('Recording failed: ${result.error}');
-        }
-      }
-      // A title-less station only streams its (second) audio connection when
-      // buffering is on, so restart the reader to match the new flag. Also cover
-      // a mid-reconnect (connecting) or exhausted (failed) reader — it may be an
-      // unsupported station whose flag now needs to change (C5).
-      if (_metaStatus == MetadataStatus.unsupported ||
-          _metaStatus == MetadataStatus.connecting ||
-          _metaStatus == MetadataStatus.failed) {
-        _startIcy(_current!, ++_playSession);
-      }
-    }
   }
 
   Future<void> _saveStations() async {
@@ -230,8 +116,7 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   /// Opens the online station search (with a manual-add fallback inside) and
-  /// merges whatever the user picked. Uses the same non-destructive `Set.add`
-  /// dedup as [_importStations], so duplicates are silently skipped.
+  /// merges whatever the user picked, with the same dedup as [_importStations].
   Future<void> _addStation() async {
     final picked = await Navigator.of(context).push<List<Station>>(
       MaterialPageRoute(
@@ -264,25 +149,21 @@ class _PlayerPageState extends State<PlayerPage>
     }
     final i = _stations.indexWhere((s) => s.url == old.url);
     if (i < 0) return; // gone (e.g. removed while the dialog was open)
-    setState(() {
-      _stations[i] = updated;
-      // Keep the now-playing highlight/title in sync if we edited the current
-      // station. Playback itself keeps running on the old connection until the
-      // user re-taps — only the list entry and label update.
-      if (_current?.url == old.url) _current = updated;
-    });
+    setState(() => _stations[i] = updated);
+    // Keep the now-playing highlight/title in sync if we edited the current
+    // station (playback keeps running on the old connection until re-tapped).
+    if (_session.current?.url == old.url) _session.renameCurrent(updated);
     await _saveStations();
   }
 
   Future<void> _removeStation(Station station) async {
-    if (_current?.url == station.url) await _stop();
+    if (_session.current?.url == station.url) await _session.stop();
     setState(() => _stations.removeWhere((s) => s.url == station.url));
     await _saveStations();
   }
 
   /// Import stations from a user-picked CSV (`name,url` per row, optional
-  /// header). Merges into the current list, skipping URLs already present, so
-  /// importing is always non-destructive (same dedup rule as [_addStation]).
+  /// header). Merges into the current list, skipping URLs already present.
   Future<void> _importStations() async {
     final FilePickerResult? result;
     try {
@@ -390,19 +271,18 @@ class _PlayerPageState extends State<PlayerPage>
 
   // Desktop window-close handler (WindowListener). setPreventClose(true) routes
   // the close here first. Closing while media_kit is playing races its native
-  // shutdown and segfaults (the engine also errors removing its implicit view),
-  // so we finalize any in-progress recording via _stop() and then hard-exit,
-  // skipping the racy engine/plugin teardown entirely. exit() also covers the
-  // recordings library's separate AudioPlayer, which this State can't reach.
+  // shutdown and segfaults, so we finalize any in-progress recording via the
+  // session then hard-exit, skipping the racy engine/plugin teardown. exit()
+  // also covers the recordings library's separate AudioPlayer.
   @override
   void onWindowClose() async {
     if (_closing) return;
     _closing = true;
     try {
-      await _stop();
+      await _session.stop(); // finalize any in-progress recording
       // exit(0) skips State.dispose, so drop the recorder's private temp dir
       // here rather than leaking it on every desktop close (S3/C6).
-      await _recorder.dispose();
+      await _session.shutdown();
     } catch (_) {}
     exit(0);
   }
@@ -414,11 +294,8 @@ class _PlayerPageState extends State<PlayerPage>
     _searchController.dispose();
     _searchFocus.dispose();
     _pageFocus.dispose();
-    _playbackSub?.cancel();
-    _player.dispose();
-    _icy.stop();
-    _recorder.dispose();
-    audioHandler.detach(this);
+    _session.removeListener(_onSessionChanged);
+    _session.dispose();
     super.dispose();
   }
 
@@ -464,542 +341,6 @@ class _PlayerPageState extends State<PlayerPage>
     }
     _openSearch(seed: ch);
     return KeyEventResult.handled;
-  }
-
-  Future<void> _play(Station station) async {
-    // A new session: any late work from the previous station (a fast switch)
-    // checks this id and bails before touching UI / history / recording state.
-    final session = ++_playSession;
-    setState(() {
-      _current = station;
-      _paused = false;
-      _loading = true;
-      _streamError = false;
-      _nowPlaying = '';
-      _trackInfoFresh = false;
-      _metaStatus = MetadataStatus.connecting;
-      _lastHistoryTitle =
-          ''; // new session: let the first song log even if same
-      _lastRecTitle = ''; // reset the recorder's track-change dedup
-      _recording = false;
-      _manualRecording = false;
-    });
-    // Drop the previous station's metadata connection up front — it's irrelevant
-    // once the user switched, and this ensures even a *failed* retune (setUrl
-    // throws below) doesn't leave the old reader reconnecting in the background.
-    await _icy.stop();
-    // Switching station ends any in-progress recording (spec: a station change
-    // stops recording) — finalize it before we retune.
-    final result = await _recorder.onStreamStopped();
-    if (session != _playSession) return; // superseded while finalizing
-    if (result.path != null) {
-      _snack('Saved recording: ${_baseName(result.path!)}');
-    } else if (result.error != null) {
-      _snack('Recording failed: ${result.error}');
-    }
-    try {
-      await _player.setUrl(station.url);
-      // Don't await play(): for an endless radio stream just_audio's play()
-      // Future never completes (it only resolves when playback ends/stops), so
-      // awaiting it would block here forever — leaving "Connecting…" stuck and
-      // the metadata reader below unreached. (The media_kit desktop backend
-      // returned promptly, so this only surfaced on Android/ExoPlayer.)
-      // catchError so a late play() failure surfaces instead of going unhandled.
-      unawaited(_player.play().catchError((Object e) => _onPlayerError(e)));
-    } catch (e) {
-      // Playback failed: return to the stopped state instead of looking like
-      // we're playing and waiting for track info. Don't start the buffer, the
-      // metadata reader, or the foreground service for a station that isn't on.
-      if (session != _playSession || !mounted) return;
-      setState(() {
-        _current = null;
-        _loading = false;
-        _nowPlaying = '';
-        _trackInfoFresh = false;
-        _metaStatus = MetadataStatus.idle;
-        _lastHistoryTitle = '';
-        _lastRecTitle = '';
-        _recording = false;
-        _manualRecording = false;
-      });
-      _snack('Could not play ${station.name}: $e');
-      audioHandler.detach(this); // no station on ⇒ tear the session down
-      return;
-    }
-    if (session != _playSession || !mounted) return; // superseded
-    setState(() => _loading = false);
-    // Start a fresh buffer (if enabled) before audio flows, then the metadata/
-    // audio reader. Both are best-effort on a separate connection. The callbacks
-    // are session-guarded so a stale connection can't write into current state.
-    await _recorder.startBuffering();
-    if (session != _playSession) return;
-    _startIcy(station, session);
-    // Raise (or refresh) the media session / notification for this station.
-    _publishRadio();
-  }
-
-  /// Open the metadata/audio reader for [station], tagging its callbacks with
-  /// [session] so a superseded connection can't write into current state. Passes
-  /// the buffering flag so title-less stations only keep their (second) audio
-  /// connection open when there's a buffer to feed.
-  void _startIcy(Station station, int session) {
-    _icy.start(
-      station.url,
-      bufferWithoutMetadata: _recBuffering,
-      onTitle: (title) {
-        if (session != _playSession || !mounted) return;
-        // The reader re-emits the same title every icy-metaint bytes
-        // (~1–2.5×/sec). Rebuild only on a real change or on recovery from a
-        // non-active status — otherwise we rebuild the whole page for nothing
-        // (P1). History + track-change still run each tick (they dedup);
-        // _recordHistory must, so re-enabling history mid-song still logs the
-        // current track.
-        final unchanged = title == _nowPlaying &&
-            _trackInfoFresh &&
-            _metaStatus == MetadataStatus.active;
-        if (!unchanged) {
-          setState(() {
-            _nowPlaying = title;
-            _metaStatus = MetadataStatus.active;
-            _trackInfoFresh = true; // live title ⇒ Save/Record are meaningful
-          });
-        }
-        _recordHistory(title);
-        _handleTrackChange(title);
-      },
-      // No buffering ⇒ no audio sink, so the parser skips copying/forwarding
-      // audio runs entirely (P7). bufferWithoutMetadata is also _recBuffering,
-      // so a title-less station keeps no second connection either — consistent.
-      onAudio: _recBuffering ? _recorder.addAudio : null,
-      onStatus: (status) {
-        if (session != _playSession || !mounted) return;
-        setState(() {
-          _metaStatus = status;
-          // Only an active feed is "fresh". A drop/exhausted-reconnect (failed),
-          // an unsupported station, or a reconnecting gap (connecting) means the
-          // shown title is stale — don't let it be saved/recorded.
-          _trackInfoFresh = status == MetadataStatus.active;
-        });
-      },
-    );
-  }
-
-  Future<void> _setVolume(double value) async {
-    // Touching the slider is an explicit volume choice, so it also unmutes.
-    setState(() {
-      _volume = value;
-      _muted = false;
-    });
-    await _player.setVolume(value);
-  }
-
-  /// Persist the volume once, on slider release, rather than on every drag frame
-  /// (P9). Called from the slider's onChangeEnd.
-  Future<void> _persistVolume(double value) async {
-    await _prefs?.setDouble(volumeKey, value);
-  }
-
-  /// Re-read the shared `volume` pref (the recordings view can change it) and
-  /// apply it to the radio player + slider so they don't drift out of sync.
-  Future<void> _reloadVolume() async {
-    final v = _prefs?.getDouble(volumeKey);
-    if (v == null || v == _volume) return;
-    if (mounted) setState(() => _volume = v);
-    if (!_muted) await _player.setVolume(v);
-  }
-
-  /// Silence the radio without disconnecting (keeps the stream + metadata alive).
-  /// The slider still shows the intended [_volume]; the button reflects the mute.
-  Future<void> _toggleMute() async {
-    final muted = !_muted;
-    setState(() => _muted = muted);
-    await _player.setVolume(muted ? 0 : _volume);
-  }
-
-  Future<void> _stop() async {
-    _playSession++; // invalidate any in-flight _play / metadata callbacks
-    await _player.stop();
-    await _icy.stop();
-    final result = await _recorder.onStreamStopped();
-    // Drop mute and restore the real volume so the next station isn't silent.
-    if (_muted) await _player.setVolume(_volume);
-    // Reachable while unmounted via onTaskRemoved → driverStop → _stop, so guard
-    // setState (C8) — but still detach the session below either way.
-    if (mounted) {
-      setState(() {
-        _current = null;
-        _paused = false;
-        _nowPlaying = '';
-        _trackInfoFresh = false;
-        _metaStatus = MetadataStatus.idle;
-        _lastHistoryTitle = '';
-        _lastRecTitle = '';
-        _recording = false;
-        _manualRecording = false;
-        _muted = false;
-        _streamError = false;
-      });
-    } else {
-      _current = null;
-      _paused = false;
-      _recording = false;
-      _manualRecording = false;
-    }
-    // Nothing playing now ⇒ tear the media session down.
-    audioHandler.detach(this);
-    if (result.path != null) {
-      _snack('Saved recording: ${_baseName(result.path!)}');
-    } else if (result.error != null) {
-      _snack('Recording failed: ${result.error}');
-    }
-  }
-
-  /// Non-destructive pause for live radio, from the media session / Bluetooth /
-  /// car. Silences the speaker (stops ExoPlayer) but keeps the ICY metadata +
-  /// recording socket running, so an in-progress recording is NOT interrupted and
-  /// still auto-finalizes on the next track. Play (driverPlay) resumes to live.
-  Future<void> _pauseRadio() async {
-    if (_current == null || _paused) return;
-    await _player.pause();
-    setState(() => _paused = true);
-    _publishRadio();
-  }
-
-  /// Resume after [_pauseRadio]: ExoPlayer restarts from the live edge. The
-  /// metadata/recording socket never stopped, so nothing else needs restarting.
-  Future<void> _resumeRadio() async {
-    if (_current == null || !_paused) return;
-    // never await an endless stream (see _play); catch a late failure.
-    unawaited(_player.play().catchError((Object e) => _onPlayerError(e)));
-    setState(() {
-      _paused = false;
-      _streamError = false;
-    });
-    _publishRadio();
-  }
-
-  /// The radio player errored (mid-stream drop, decode failure, or a failed late
-  /// play()). Surface it instead of the fake "playing" the ICY auto-reconnect
-  /// would otherwise mask. Reconnect is manual — the user re-taps the station.
-  void _onPlayerError(Object e) {
-    if (!mounted || _current == null) return; // already stopped / switching
-    setState(() {
-      _streamError = true;
-      _loading = false;
-    });
-    _snack('Stream lost — tap the station to reconnect.');
-  }
-
-  /// React to a genuine track change (the ICY reader re-emits the same title each
-  /// tick, so we dedup on [_lastRecTitle]). The very first title of a session is
-  /// the initial track — the buffer is already running from [_play], so we don't
-  /// reset it; only a real change finalizes an armed recording and clears it.
-  Future<void> _handleTrackChange(String title) async {
-    if (title == _lastRecTitle) return;
-    final isFirst = _lastRecTitle.isEmpty;
-    _lastRecTitle = title;
-    if (isFirst) {
-      // Reflect the first real title in the media card.
-      _publishRadio();
-      return;
-    }
-    final result = await _recorder.onTrackChanged();
-    // A finished (path) or failed (error) recording both end the recording
-    // state — clear the red glow either way, else it persists indefinitely.
-    if (result.path != null || result.error != null) {
-      if (mounted) {
-        setState(() {
-          _recording = false;
-          _manualRecording = false;
-        });
-      } else {
-        _recording = false;
-        _manualRecording = false;
-      }
-      _snack(result.path != null
-          ? 'Saved recording: ${_baseName(result.path!)}'
-          : 'Recording failed: ${result.error}');
-    }
-    // Refresh the card for the new track / cleared recording state.
-    _publishRadio();
-  }
-
-  /// Whether recording can be *started* now: buffering on, a station playing,
-  /// and either a fresh live title (auto mode) or a title-less station we're
-  /// streaming raw (manual mode).
-  bool get _canRecord =>
-      _recBuffering &&
-      _current != null &&
-      (_trackInfoFresh || _metaStatus == MetadataStatus.unsupported);
-
-  /// Arm recording, or finish/cancel an in-progress one.
-  Future<void> _toggleRecord() async {
-    if (_recording) {
-      if (_manualRecording) {
-        // No upcoming track change to auto-save on — this tap is the save.
-        unawaited(_saveManualRecording());
-      } else {
-        _recorder.cancel();
-        setState(() => _recording = false);
-        _publishRadio(); // card back to "playing"
-        _snack('Recording cancelled.');
-      }
-      return;
-    }
-    if (_current == null) {
-      _snack('Start a station first.');
-      return;
-    }
-    // A prior arm is still resolving — ignore the double-tap.
-    if (_arming) return;
-    // Title-less station ⇒ user-bounded ("manual") recording, named after the
-    // station + a timestamp since there's no Artist - Title.
-    final manual = !_trackInfoFresh;
-    if (!manual && _nowPlaying.isEmpty) {
-      _snack('Wait for the track info before recording.');
-      return;
-    }
-    final recName = manual ? '${_current!.name} ${_recStamp()}' : _nowPlaying;
-    // Cap the lead-in for manual recordings (title-less stations have no song
-    // boundary, so the buffer could otherwise prepend many minutes of unrelated
-    // audio). Titled recordings pass null: the buffer already starts at the song.
-    int? leadInBytes;
-    if (manual && _recLeadSeconds >= 0) {
-      final kbps = _icy.bitrateKbps ?? 128; // fall back if the server omits it
-      leadInBytes =
-          kbps * 125 * _recLeadSeconds; // kbps*1000/8 bytes per second
-    }
-    // arm() is queued through the recorder's op lock, so a tap landing during an
-    // in-flight finalize/startBuffering (e.g. right at a track change) waits for
-    // the fresh buffer and arms it rather than silently no-opping (C2). Only mark
-    // the UI as recording once arming actually succeeded, else the red state
-    // would stick with nothing recorded.
-    _arming = true;
-    final armed = await _recorder.arm(recName, _current!.name, _icy.contentType,
-        leadInBytes: leadInBytes);
-    _arming = false;
-    if (!mounted) return;
-    if (!armed) {
-      _snack('Couldn\'t start recording — try again.');
-      return;
-    }
-    setState(() {
-      _recording = true;
-      _manualRecording = manual;
-    });
-    _publishRadio(); // reflect "recording" in the card
-    _snack(manual
-        ? 'Recording… tap again to save.'
-        : 'Recording… it saves automatically when the track changes.');
-  }
-
-  /// Finalize a manual (title-less) recording and start a fresh buffer.
-  Future<void> _saveManualRecording() async {
-    final result = await _recorder.onTrackChanged(); // finalize + fresh buffer
-    if (mounted) {
-      setState(() {
-        _recording = false;
-        _manualRecording = false;
-      });
-    }
-    _publishRadio();
-    if (result.path != null) {
-      _snack('Saved recording: ${_baseName(result.path!)}');
-    } else if (result.error != null) {
-      _snack('Recording failed: ${result.error}');
-    } else {
-      _snack('Nothing recorded yet.');
-    }
-  }
-
-  /// A filename-safe `YYYY-MM-DD HH.MM` stamp for naming title-less recordings.
-  String _recStamp() {
-    final n = DateTime.now();
-    String two(int x) => x.toString().padLeft(2, '0');
-    return '${n.year}-${two(n.month)}-${two(n.day)} '
-        '${two(n.hour)}.${two(n.minute)}';
-  }
-
-  /// Publish the current radio state to the media session (rich notification +
-  /// lock screen + Bluetooth/car). While a station is active it also holds the
-  /// process in the foreground so playback + the recording/metadata socket
-  /// survive the screen turning off. When nothing is active it tears the session
-  /// down. No-op off mobile; best-effort (never breaks playback/recording).
-  void _publishRadio() {
-    if (!(Platform.isAndroid || Platform.isIOS)) return;
-    if (_current == null) {
-      audioHandler.detach(this);
-      return;
-    }
-    audioHandler.attach(PlaybackMode.radio, this);
-    audioHandler.publishRadio(
-      stationName: _current!.name,
-      nowPlaying: _nowPlaying,
-      playing: !_paused,
-      recording: _recording,
-    );
-  }
-
-  // --- AudioModeDriver: transport from the media session / Bluetooth / car ---
-
-  @override
-  Future<void> driverPlay() async {
-    // driverPlay only fires while this page is the active driver, which means a
-    // station is loaded (playing or paused). So the only meaningful action is
-    // resuming from a pause; a full Stop detaches the session entirely (there's
-    // no lingering notification to Play from — the user restarts from the app).
-    if (_paused) await _resumeRadio();
-  }
-
-  @override
-  Future<void> driverPause() => _pauseRadio();
-
-  @override
-  Future<void> driverStop() => _stop();
-
-  // Live radio has no seek/skip.
-  @override
-  Future<void> driverSeek(Duration position) async {}
-
-  @override
-  Future<void> driverSkipNext() async {}
-
-  String _baseName(String path) => path.split(Platform.pathSeparator).last;
-
-  /// Message shown in the now-playing box when there's no title yet — distinct
-  /// per metadata state so the user can tell "still connecting" from "this
-  /// station has no track info" from "the metadata connection failed".
-  String _metaStatusMessage() {
-    switch (_metaStatus) {
-      case MetadataStatus.idle:
-      case MetadataStatus.connecting:
-        return 'Connecting…';
-      case MetadataStatus.unsupported:
-        return 'This station doesn\'t provide track info.';
-      case MetadataStatus.failed:
-        return 'Track info unavailable.';
-      case MetadataStatus.waitingForFirstTitle:
-      case MetadataStatus.active:
-        return 'Waiting for track info…';
-    }
-  }
-
-  /// The now-playing line. Shows a live title when the feed is fresh; keeps a
-  /// stale title visible across a brief reconnect; and, once reconnects are
-  /// exhausted, flags it as stale rather than passing it off as current.
-  String _nowPlayingText(bool playing) {
-    if (_loading) return 'Connecting…';
-    if (!playing) return '—';
-    // A dead player wins over any (auto-reconnecting) ICY title, so lost audio
-    // can't keep masquerading as playing (C3).
-    if (_streamError) return 'Stream lost — tap the station to reconnect.';
-    if (_trackInfoFresh && _nowPlaying.isNotEmpty) return _nowPlaying;
-    if (_nowPlaying.isNotEmpty && _metaStatus == MetadataStatus.failed) {
-      return 'Track info unavailable — last: $_nowPlaying';
-    }
-    // Reconnecting gap: keep the (stale) title rather than flicker the message.
-    if (_nowPlaying.isNotEmpty && _metaStatus == MetadataStatus.connecting) {
-      return _nowPlaying;
-    }
-    return _metaStatusMessage();
-  }
-
-  /// A friendly codec label from the stream's `Content-Type`, or null if it's
-  /// missing/unrecognised (better to show nothing than a cryptic MIME string).
-  String? _streamFormatLabel(String? contentType) {
-    final c = (contentType ?? '').toLowerCase();
-    if (c.isEmpty) return null;
-    if (c.contains('aac')) return 'AAC';
-    if (c.contains('opus')) return 'Opus';
-    if (c.contains('ogg') || c.contains('vorbis')) return 'OGG';
-    if (c.contains('flac')) return 'FLAC';
-    if (c.contains('wav')) return 'WAV';
-    if (c.contains('mpeg') || c.contains('mp3')) return 'MP3';
-    return null;
-  }
-
-  /// Small "format · bitrate" line under the title, from the ICY response
-  /// headers (either may be absent). Null when neither is known.
-  String? _streamInfoLine() {
-    final fmt = _streamFormatLabel(_icy.contentType);
-    final br = _icy.bitrateKbps;
-    if (fmt == null && br == null) return null;
-    if (fmt != null && br != null) return '$fmt · $br kbps';
-    return fmt ?? '$br kbps';
-  }
-
-  /// Append a song to the play history the first time we see its title for the
-  /// current session. Fires from [IcyReader.onTitle] (which re-emits the same
-  /// title each metadata tick — hence the dedup). Best-effort, like metadata.
-  Future<void> _recordHistory(String rawTitle) async {
-    final station = _current;
-    if (station == null || rawTitle.isEmpty || rawTitle == _lastHistoryTitle) {
-      return;
-    }
-    // Logging can be turned off from the History view. Bail before updating
-    // _lastHistoryTitle so re-enabling mid-song still logs the current track.
-    if (!(_prefs?.getBool(historyLoggingKey) ?? true)) return;
-    _lastHistoryTitle = rawTitle;
-    final parts = splitArtistTitle(rawTitle);
-    final row = [
-      DateTime.now().toIso8601String(),
-      station.name,
-      parts.artist,
-      parts.title,
-      '', // album (not available from ICY)
-      rawTitle, // raw, as a fallback
-    ].map(csvField).join(',');
-    try {
-      final file = await historyFile();
-      if (!await file.exists()) {
-        await file.writeAsString('timestamp,station,artist,title,album,raw\n');
-      }
-      await file.writeAsString('$row\n', mode: FileMode.append);
-      // Keep the unbounded history in check: rewrite to the newest rows once it
-      // grows past the size cap (rarely, so O(file) isn't paid per song).
-      if (await file.length() > historyCapBytes) {
-        final trimmed = capCsvRows(await file.readAsString(), historyKeepRows);
-        if (trimmed != null) await file.writeAsString(trimmed);
-      }
-    } catch (e) {
-      // History is a best-effort log — don't disrupt playback, just trace it.
-      logSwallowed('_recordHistory', e);
-    }
-  }
-
-  Future<void> _saveCurrentTrack() async {
-    if (_current == null || _nowPlaying.isEmpty) {
-      _snack('Nothing playing yet — no track to save.');
-      return;
-    }
-
-    // ICY only gives us "Artist - Title". Album is rarely present, so it stays
-    // empty unless you later add a per-station metadata source.
-    final parts = splitArtistTitle(_nowPlaying);
-    final artist = parts.artist;
-    final title = parts.title;
-
-    final row = [
-      DateTime.now().toIso8601String(),
-      _current!.name,
-      artist,
-      title,
-      '', // album (not available from ICY)
-      _nowPlaying, // raw, as a fallback
-    ].map(csvField).join(',');
-
-    try {
-      final file = await savedTracksFile();
-      if (!await file.exists()) {
-        await file.writeAsString(
-          'timestamp,station,artist,title,album,raw\n',
-        );
-      }
-      await file.writeAsString('$row\n', mode: FileMode.append);
-      _snack('Saved: ${artist.isEmpty ? title : "$artist — $title"}');
-    } catch (e) {
-      _snack('Save failed: $e');
-    }
   }
 
   void _snack(String message) {
@@ -1051,15 +392,17 @@ class _PlayerPageState extends State<PlayerPage>
 
   @override
   Widget build(BuildContext context) {
-    final playing = _current != null;
+    final playing = _session.isPlaying;
     // Case-insensitive substring match on the station name (hoist the query's
     // toLowerCase out of the per-station closure — P11).
     final q = _query.toLowerCase();
     final visible = _query.isEmpty
         ? _stations
         : _stations.where((s) => s.name.toLowerCase().contains(q)).toList();
-    // Compute once instead of calling _streamInfoLine() twice in the tree (P11).
-    final streamInfo = playing ? _streamInfoLine() : null;
+    final streamInfo = playing ? _session.streamInfoLine : null;
+    final recording = _session.recording;
+    final muted = _session.muted;
+    final volume = _session.volume;
     return Scaffold(
       appBar: AppBar(
         // Phones are width-constrained, so drop "Radio" from the app-bar name
@@ -1106,12 +449,12 @@ class _PlayerPageState extends State<PlayerPage>
             onPressed: () async {
               await Navigator.of(context).push(
                 MaterialPageRoute<void>(
-                  builder: (_) => RecordingsPage(stopRadio: _stop),
+                  builder: (_) => RecordingsPage(stopRadio: _session.stop),
                 ),
               );
               // The recordings view shares the `volume` pref; pick up a change
               // made there so the radio slider/player aren't left stale.
-              await _reloadVolume();
+              await _session.reloadVolume();
             },
           ),
           IconButton(
@@ -1123,7 +466,7 @@ class _PlayerPageState extends State<PlayerPage>
                   builder: (_) => const SettingsPage(),
                 ),
               );
-              await _applyRecordingPrefs(); // pick up any changes
+              await _session.applyRecordingPrefs(); // pick up any changes
             },
           ),
         ],
@@ -1148,21 +491,21 @@ class _PlayerPageState extends State<PlayerPage>
                 Row(
                   children: [
                     IconButton(
-                      onPressed: _toggleMute,
-                      tooltip: _muted ? 'Unmute' : 'Mute',
+                      onPressed: _session.toggleMute,
+                      tooltip: muted ? 'Unmute' : 'Mute',
                       icon: Icon(
-                        _muted || _volume == 0
+                        muted || volume == 0
                             ? Icons.volume_off
-                            : (_volume < 0.5
+                            : (volume < 0.5
                                 ? Icons.volume_down
                                 : Icons.volume_up),
                       ),
                     ),
                     Expanded(
                       child: Slider(
-                        value: _volume,
-                        onChanged: _muted ? null : _setVolume,
-                        onChangeEnd: _muted ? null : _persistVolume,
+                        value: volume,
+                        onChanged: muted ? null : _session.setVolume,
+                        onChangeEnd: muted ? null : _session.persistVolume,
                       ),
                     ),
                   ],
@@ -1175,10 +518,10 @@ class _PlayerPageState extends State<PlayerPage>
                     borderRadius: BorderRadius.circular(12),
                     border: Border.all(
                       color:
-                          _recording ? Colors.red.shade500 : Colors.transparent,
+                          recording ? Colors.red.shade500 : Colors.transparent,
                       width: 1.5,
                     ),
-                    boxShadow: _recording
+                    boxShadow: recording
                         ? [
                             BoxShadow(
                               color: Colors.red.shade500.withValues(alpha: 0.6),
@@ -1200,12 +543,12 @@ class _PlayerPageState extends State<PlayerPage>
                       child: Column(
                         children: [
                           Text(
-                            playing ? _current!.name : 'Stopped',
+                            playing ? _session.current!.name : 'Stopped',
                             style: Theme.of(context).textTheme.titleMedium,
                           ),
                           const SizedBox(height: 8),
                           Text(
-                            _nowPlayingText(playing),
+                            _session.nowPlayingText,
                             style: Theme.of(context).textTheme.headlineSmall,
                             textAlign: TextAlign.center,
                           ),
@@ -1235,7 +578,7 @@ class _PlayerPageState extends State<PlayerPage>
                     if (playing)
                       Expanded(
                         child: FilledButton.tonalIcon(
-                          onPressed: _stop,
+                          onPressed: _session.stop,
                           icon: const Icon(Icons.stop),
                           label: const Text('Stop'),
                         ),
@@ -1244,18 +587,19 @@ class _PlayerPageState extends State<PlayerPage>
                     if (playing) const SizedBox(width: 12),
                     if (playing)
                       IconButton.filledTonal(
-                        onPressed: _toggleMute,
-                        isSelected: _muted,
-                        tooltip: _muted ? 'Unmute' : 'Mute',
-                        icon: Icon(_muted ? Icons.volume_off : Icons.volume_up),
+                        onPressed: _session.toggleMute,
+                        isSelected: muted,
+                        tooltip: muted ? 'Unmute' : 'Mute',
+                        icon: Icon(muted ? Icons.volume_off : Icons.volume_up),
                       ),
                     // "Save title" needs a *fresh* live title (not a stale one
                     // left over after the metadata feed dropped).
-                    if (playing && _trackInfoFresh) const SizedBox(width: 12),
-                    if (playing && _trackInfoFresh)
+                    if (playing && _session.trackInfoFresh)
+                      const SizedBox(width: 12),
+                    if (playing && _session.trackInfoFresh)
                       Expanded(
                         child: FilledButton.icon(
-                          onPressed: _saveCurrentTrack,
+                          onPressed: _session.saveCurrentTrack,
                           icon: const Icon(Icons.favorite),
                           label: const Text('Save title'),
                         ),
@@ -1266,27 +610,27 @@ class _PlayerPageState extends State<PlayerPage>
                 // saves on the next track change) or a title-less station we're
                 // streaming raw (manual mode, tap again to save). Stays visible
                 // while recording so you can finish/cancel even if the feed drops.
-                if (playing && (_recording || _canRecord)) ...[
+                if (playing && (recording || _session.canRecord)) ...[
                   const SizedBox(height: 12),
                   SizedBox(
                     width: double.infinity,
-                    child: _recording
+                    child: recording
                         ? FilledButton.icon(
-                            onPressed: _toggleRecord,
+                            onPressed: _session.toggleRecord,
                             style: FilledButton.styleFrom(
                               backgroundColor: Colors.red.shade700,
                               foregroundColor: Colors.white,
                             ),
                             icon: const Icon(Icons.stop_circle),
-                            label: Text(_manualRecording
+                            label: Text(_session.manualRecording
                                 ? 'Recording… tap to save'
                                 : 'Recording… tap to cancel'),
                           )
                         : FilledButton.tonalIcon(
-                            onPressed: _toggleRecord,
+                            onPressed: _session.toggleRecord,
                             icon: Icon(Icons.fiber_manual_record,
                                 color: Colors.red.shade400),
-                            label: Text(_trackInfoFresh
+                            label: Text(_session.trackInfoFresh
                                 ? 'Record this song'
                                 : 'Record'),
                           ),
@@ -1333,8 +677,8 @@ class _PlayerPageState extends State<PlayerPage>
                             final s = visible[i];
                             return StationTile(
                               station: s,
-                              isCurrent: _current?.url == s.url,
-                              onTap: () => _play(s),
+                              isCurrent: _session.current?.url == s.url,
+                              onTap: () => _session.play(s),
                               onEdit: () => _editStation(s),
                               onDelete: () => _removeStation(s),
                             );
