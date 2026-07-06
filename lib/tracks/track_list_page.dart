@@ -129,6 +129,7 @@ class _TrackListPageState extends State<TrackListPage> {
       _loading = false;
       _logging = logging;
       _visibleCount = _pageSize;
+      _recomputeVisible();
     });
   }
 
@@ -171,16 +172,23 @@ class _TrackListPageState extends State<TrackListPage> {
     );
   }
 
-  /// The rows actually shown: the full list, or those matching the query on
-  /// artist / title / station (case-insensitive substring).
-  List<SavedTrack> get _visible {
-    if (_query.isEmpty) return _tracks;
+  /// The rows actually shown (full list, or those matching the query on
+  /// artist / title / station). Cached so build + every near-bottom scroll
+  /// frame don't re-run the filter; recomputed only when the query or the
+  /// track list/order changes (via [_recomputeVisible]).
+  List<SavedTrack> _visible = [];
+
+  void _recomputeVisible() {
+    if (_query.isEmpty) {
+      _visible = _tracks;
+      return;
+    }
     final q = _query.toLowerCase();
-    return _tracks
+    _visible = _tracks
         .where((t) =>
-            t.artist.toLowerCase().contains(q) ||
-            t.title.toLowerCase().contains(q) ||
-            t.station.toLowerCase().contains(q))
+            t.artistLower.contains(q) ||
+            t.titleLower.contains(q) ||
+            t.stationLower.contains(q))
         .toList();
   }
 
@@ -192,6 +200,7 @@ class _TrackListPageState extends State<TrackListPage> {
         _searchController.selection =
             TextSelection.collapsed(offset: seed.length);
         _query = seed;
+        _recomputeVisible();
       }
     });
     _searchFocus.requestFocus();
@@ -202,6 +211,7 @@ class _TrackListPageState extends State<TrackListPage> {
       _searching = false;
       _query = '';
       _searchController.clear();
+      _recomputeVisible();
     });
     _pageFocus.requestFocus();
   }
@@ -230,6 +240,7 @@ class _TrackListPageState extends State<TrackListPage> {
         autofocus: true,
         onChanged: (v) => setState(() {
           _query = v;
+          _recomputeVisible();
           _resetWindow();
         }),
         textInputAction: TextInputAction.search,
@@ -256,16 +267,17 @@ class _TrackListPageState extends State<TrackListPage> {
         final int r;
         switch (columnIndex) {
           case 1:
-            r = a.station.toLowerCase().compareTo(b.station.toLowerCase());
+            r = a.stationLower.compareTo(b.stationLower);
           case 2:
-            r = a.artist.toLowerCase().compareTo(b.artist.toLowerCase());
+            r = a.artistLower.compareTo(b.artistLower);
           case 3:
-            r = a.title.toLowerCase().compareTo(b.title.toLowerCase());
+            r = a.titleLower.compareTo(b.titleLower);
           default:
             r = a.timestamp.compareTo(b.timestamp);
         }
         return ascending ? r : -r;
       });
+      _recomputeVisible();
       _resetWindow();
     });
   }
@@ -353,7 +365,10 @@ class _TrackListPageState extends State<TrackListPage> {
       await file.writeAsString('timestamp,station,artist,title,album,raw\n');
     }
     if (!mounted) return;
-    setState(() => _tracks = []);
+    setState(() {
+      _tracks = [];
+      _recomputeVisible();
+    });
   }
 
   /// A "Showing X of Y — Show more" footer below a windowed list. Scrolling near
