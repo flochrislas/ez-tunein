@@ -22,6 +22,13 @@ final accentColor = ValueNotifier<Color>(const Color(defaultAccentValue));
 // immediately visible to the player without extra plumbing).
 const historyLoggingKey = 'history_logging';
 
+// Retention cap for the append-only play-history CSV. When the file grows past
+// historyCapBytes it's rewritten keeping the newest historyKeepRows rows, so the
+// history (and the memory to open it) stays bounded. The trim only runs when the
+// size threshold is crossed, so it's O(file) rarely, not per song.
+const historyCapBytes = 4 * 1024 * 1024;
+const historyKeepRows = 20000;
+
 // Player volume (0.0–1.0); shared by the radio player and the recordings library.
 const volumeKey = 'volume';
 

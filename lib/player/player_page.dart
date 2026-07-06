@@ -955,6 +955,12 @@ class _PlayerPageState extends State<PlayerPage>
         await file.writeAsString('timestamp,station,artist,title,album,raw\n');
       }
       await file.writeAsString('$row\n', mode: FileMode.append);
+      // Keep the unbounded history in check: rewrite to the newest rows once it
+      // grows past the size cap (rarely, so O(file) isn't paid per song).
+      if (await file.length() > historyCapBytes) {
+        final trimmed = capCsvRows(await file.readAsString(), historyKeepRows);
+        if (trimmed != null) await file.writeAsString(trimmed);
+      }
     } catch (e) {
       // History is a best-effort log — don't disrupt playback, just trace it.
       logSwallowed('_recordHistory', e);

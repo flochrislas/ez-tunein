@@ -147,4 +147,29 @@ void main() {
       ]);
     });
   });
+
+  group('capCsvRows', () {
+    test('returns null when within the cap', () {
+      expect(capCsvRows('h1,h2\na,b\nc,d\n', 5), isNull);
+      // Exactly at the cap (header + N rows) ⇒ no rewrite.
+      expect(capCsvRows('h1,h2\na,b\nc,d\n', 2), isNull);
+    });
+
+    test('keeps the header + the newest N rows', () {
+      final out = capCsvRows('ts,v\n1,a\n2,b\n3,c\n4,d\n', 2);
+      expect(parseCsv(out!), [
+        ['ts', 'v'],
+        ['3', 'c'],
+        ['4', 'd'],
+      ]);
+    });
+
+    test('preserves fields that need quoting', () {
+      final out = capCsvRows('ts,v\n1,"a,b"\n2,"x""y"\n3,c\n', 1);
+      expect(parseCsv(out!), [
+        ['ts', 'v'],
+        ['3', 'c'],
+      ]);
+    });
+  });
 }

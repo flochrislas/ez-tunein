@@ -107,3 +107,18 @@ String csvField(String value) {
   }
   return v;
 }
+
+/// Bound an append-only CSV: if [content] (a header row + data rows) has more
+/// than [maxDataRows] data rows, return a rewritten CSV keeping the header and
+/// the **newest** [maxDataRows] rows; otherwise return null (no rewrite needed).
+/// Round-trips fields through parse/quote so embedded commas/quotes/newlines
+/// survive. Used to cap the unbounded play-history file at the source.
+String? capCsvRows(String content, int maxDataRows) {
+  final rows = parseCsv(content);
+  if (rows.length <= maxDataRows + 1) return null; // header + rows within cap
+  final out = StringBuffer()..writeln(rows.first.map(csvField).join(','));
+  for (final r in rows.sublist(rows.length - maxDataRows)) {
+    out.writeln(r.map(csvField).join(','));
+  }
+  return out.toString();
+}
