@@ -25,9 +25,14 @@ String fmtDateTime(String iso) {
       '${two(dt.hour)}:${two(dt.minute)}';
 }
 
-/// Format a duration as `M:SS` for the recordings seek bar.
+/// Format a duration as `M:SS` (or `H:MM:SS` for an hour or more) for the
+/// recordings seek bar.
 String fmtDuration(Duration d) {
-  final m = d.inMinutes;
-  final s = d.inSeconds % 60;
-  return '$m:${s.toString().padLeft(2, '0')}';
+  final h = d.inHours;
+  final s = (d.inSeconds % 60).toString().padLeft(2, '0');
+  if (h > 0) {
+    final m = (d.inMinutes % 60).toString().padLeft(2, '0');
+    return '$h:$m:$s';
+  }
+  return '${d.inMinutes}:$s';
 }

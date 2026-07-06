@@ -51,6 +51,9 @@ class _RecordingsPageState extends State<RecordingsPage>
   bool _neverStops = false;
   bool _randomize = false;
   bool _radioStopped = false; // stop the radio only once, on first play
+  // Monotonic play-session id: bumped per _playAt/_stopPlayback so a superseded
+  // rapid tap can't win the race and desync the player vs the UI (C9).
+  int _playSession = 0;
 
   @override
   void initState() {
@@ -138,8 +141,11 @@ class _RecordingsPageState extends State<RecordingsPage>
 
   Future<void> _playAt(int i) async {
     if (i < 0 || i >= _files.length) return;
+    final session =
+        ++_playSession; // this tap owns the session until superseded
     if (!_radioStopped) {
       await widget.stopRadio(); // first play silences the live radio
+      if (session != _playSession || !mounted) return; // a newer tap took over
       _radioStopped = true;
     }
     // Re-selecting the file that's already loaded (e.g. a one-song list under
@@ -152,26 +158,24 @@ class _RecordingsPageState extends State<RecordingsPage>
     }
     try {
       final dur = await _player.setFilePath(_files[i].path);
+      if (session != _playSession || !mounted) return; // superseded mid-load
       // Don't await play() (see the stream gotcha) — completion arrives on the
       // player-state stream, which drives "never stops".
       unawaited(_player.play());
-      if (mounted) {
-        setState(() {
-          _index = i;
-          _duration = dur;
-          _seekDragMs = null;
-        });
-      }
+      setState(() {
+        _index = i;
+        _duration = dur;
+        _seekDragMs = null;
+      });
       _lastPushedSec = -1; // new track ⇒ allow an immediate position push
       _publishRecording(); // reflect the new track in the card
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _index = -1;
-          _duration = null;
-        });
-        _snack('Could not play that file: $e');
-      }
+      if (session != _playSession || !mounted) return;
+      setState(() {
+        _index = -1;
+        _duration = null;
+      });
+      _snack('Could not play that file: $e');
     }
   }
 
@@ -201,6 +205,7 @@ class _RecordingsPageState extends State<RecordingsPage>
   /// Stop playback entirely (the lock-screen Stop button). Clears the now-playing
   /// row, which also tears the media session down via [_publishRecording].
   Future<void> _stopPlayback() async {
+    _playSession++; // invalidate any in-flight _playAt
     await _player.stop();
     if (mounted) {
       setState(() {

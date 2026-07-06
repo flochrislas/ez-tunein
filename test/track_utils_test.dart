@@ -36,5 +36,13 @@ void main() {
     test('zero', () {
       expect(fmtDuration(Duration.zero), '0:00');
     });
+
+    test('shows an hours field once past an hour', () {
+      expect(fmtDuration(const Duration(minutes: 75, seconds: 30)), '1:15:30');
+      expect(fmtDuration(const Duration(hours: 2, minutes: 3, seconds: 4)),
+          '2:03:04');
+      // Just under an hour still uses M:SS.
+      expect(fmtDuration(const Duration(minutes: 59, seconds: 59)), '59:59');
+    });
   });
 }

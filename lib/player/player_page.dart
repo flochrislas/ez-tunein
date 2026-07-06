@@ -340,8 +340,12 @@ class _PlayerPageState extends State<PlayerPage>
         }
       }
       // A title-less station only streams its (second) audio connection when
-      // buffering is on, so restart the reader to match the new flag.
-      if (_metaStatus == MetadataStatus.unsupported) {
+      // buffering is on, so restart the reader to match the new flag. Also cover
+      // a mid-reconnect (connecting) or exhausted (failed) reader — it may be an
+      // unsupported station whose flag now needs to change (C5).
+      if (_metaStatus == MetadataStatus.unsupported ||
+          _metaStatus == MetadataStatus.connecting ||
+          _metaStatus == MetadataStatus.failed) {
         _startIcy(_current!, ++_playSession);
       }
     }
@@ -733,6 +737,15 @@ class _PlayerPageState extends State<PlayerPage>
     await _prefs?.setDouble(volumeKey, value);
   }
 
+  /// Re-read the shared `volume` pref (the recordings view can change it) and
+  /// apply it to the radio player + slider so they don't drift out of sync.
+  Future<void> _reloadVolume() async {
+    final v = _prefs?.getDouble(volumeKey);
+    if (v == null || v == _volume) return;
+    if (mounted) setState(() => _volume = v);
+    if (!_muted) await _player.setVolume(v);
+  }
+
   /// Silence the radio without disconnecting (keeps the stream + metadata alive).
   /// The slider still shows the intended [_volume]; the button reflects the mute.
   Future<void> _toggleMute() async {
@@ -748,19 +761,28 @@ class _PlayerPageState extends State<PlayerPage>
     final result = await _recorder.onStreamStopped();
     // Drop mute and restore the real volume so the next station isn't silent.
     if (_muted) await _player.setVolume(_volume);
-    setState(() {
+    // Reachable while unmounted via onTaskRemoved → driverStop → _stop, so guard
+    // setState (C8) — but still detach the session below either way.
+    if (mounted) {
+      setState(() {
+        _current = null;
+        _paused = false;
+        _nowPlaying = '';
+        _trackInfoFresh = false;
+        _metaStatus = MetadataStatus.idle;
+        _lastHistoryTitle = '';
+        _lastRecTitle = '';
+        _recording = false;
+        _manualRecording = false;
+        _muted = false;
+        _streamError = false;
+      });
+    } else {
       _current = null;
       _paused = false;
-      _nowPlaying = '';
-      _trackInfoFresh = false;
-      _metaStatus = MetadataStatus.idle;
-      _lastHistoryTitle = '';
-      _lastRecTitle = '';
       _recording = false;
       _manualRecording = false;
-      _muted = false;
-      _streamError = false;
-    });
+    }
     // Nothing playing now ⇒ tear the media session down.
     audioHandler.detach(this);
     if (result.path != null) {
@@ -1210,11 +1232,16 @@ class _PlayerPageState extends State<PlayerPage>
           IconButton(
             icon: const Icon(Icons.library_music),
             tooltip: 'Recordings',
-            onPressed: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (_) => RecordingsPage(stopRadio: _stop),
-              ),
-            ),
+            onPressed: () async {
+              await Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => RecordingsPage(stopRadio: _stop),
+                ),
+              );
+              // The recordings view shares the `volume` pref; pick up a change
+              // made there so the radio slider/player aren't left stale.
+              await _reloadVolume();
+            },
           ),
           IconButton(
             icon: const Icon(Icons.settings),
