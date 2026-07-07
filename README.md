@@ -199,6 +199,38 @@ defaults — e.g. to get a true "first run" window size again.
    flutter run -d windows         # or: flutter build windows
    ```
 
+### macOS
+
+Building for macOS requires a **Mac** — it can't be cross-compiled from Linux or
+Windows (which is why the release `.dmg` is built by CI on a macOS runner). You'll
+need:
+
+1. **Xcode** (from the App Store) and its command-line tools:
+   ```
+   xcode-select --install
+   sudo xcodebuild -runFirstLaunch
+   ```
+2. **CocoaPods** — Flutter's macOS plugins are managed with it:
+   ```
+   sudo gem install cocoapods
+   ```
+3. **Flutter SDK** — see https://docs.flutter.dev/get-started/install/macos.
+
+Then, from a clone of this repo (`media_kit` bundles its own audio libs, so no
+libmpv is needed):
+```
+flutter config --enable-macos-desktop
+flutter pub get
+flutter run -d macos           # or: flutter build macos --release
+```
+
+The build is **unsigned** (no paid Apple Developer account) — a locally built
+`.app` runs fine on your own machine. Distributable `.dmg`s are produced by the
+release workflow (ad-hoc signed so Gatekeeper allows a right-click → **Open**).
+See [`doc/releasing.md`](doc/releasing.md) and
+[`doc/Apple release processes.md`](<doc/Apple release processes.md>) for the full
+story.
+
 ### Android
 
 Building for Android needs the Android SDK and a **JDK 17+** (not the SDK's GUI
