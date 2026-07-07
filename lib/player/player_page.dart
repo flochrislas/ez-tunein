@@ -23,6 +23,7 @@ import '../stations/station_search_page.dart';
 import '../stations/station_tile.dart';
 import '../storage_paths.dart';
 import '../tracks/track_list_page.dart';
+import '../type_to_search.dart';
 import '../url_utils.dart';
 
 class PlayerPage extends StatefulWidget {
@@ -35,7 +36,8 @@ class PlayerPage extends StatefulWidget {
 /// The radio player screen. The audio/metadata/recording work lives in
 /// [RadioSession]; this State owns only the UI — the station list, the
 /// type-to-search filter, window handling, snackbars, and the build.
-class _PlayerPageState extends State<PlayerPage> with WindowListener {
+class _PlayerPageState extends State<PlayerPage>
+    with WindowListener, TypeToSearch<PlayerPage> {
   // The audio session (player + ICY metadata + recorder). Rebuilds this widget
   // via _onSessionChanged; user-facing messages come back through onMessage.
   final _session = RadioSession();
@@ -43,16 +45,8 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   Timer? _resizeDebounce;
   SharedPreferences? _prefs;
   List<Station> _stations = List.of(defaultStations);
-
-  // Type-to-search filter over station names. On desktop, typing a printable
-  // character while the page is focused opens the search bar; on mobile the
-  // app-bar magnifier does. Matching is case-insensitive substring on the name.
-  String _query = '';
-  bool _searching = false;
-  final _searchController = TextEditingController();
-  final _searchFocus = FocusNode(); // the search TextField
-  // Holds keyboard focus when not searching so we can catch the first keystroke.
-  final _pageFocus = FocusNode();
+  // Type-to-search filter (query/searching/controllers/keystroke handling) comes
+  // from the TypeToSearch mixin; matching is case-insensitive on the name.
 
   @override
   void initState() {
@@ -291,56 +285,10 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
   void dispose() {
     _resizeDebounce?.cancel();
     if (isDesktop) windowManager.removeListener(this);
-    _searchController.dispose();
-    _searchFocus.dispose();
-    _pageFocus.dispose();
+    disposeSearch();
     _session.removeListener(_onSessionChanged);
     _session.dispose();
     super.dispose();
-  }
-
-  /// Open the search bar, optionally seeding it with the first typed character,
-  /// and move keyboard focus into the field.
-  void _openSearch({String? seed}) {
-    setState(() {
-      _searching = true;
-      if (seed != null) {
-        _searchController.text = seed;
-        _searchController.selection =
-            TextSelection.collapsed(offset: seed.length);
-        _query = seed;
-      }
-    });
-    _searchFocus.requestFocus();
-  }
-
-  /// Clear the query and dismiss the search bar, returning focus to the page so
-  /// the next keystroke can re-open it.
-  void _closeSearch() {
-    setState(() {
-      _searching = false;
-      _query = '';
-      _searchController.clear();
-    });
-    _pageFocus.requestFocus();
-  }
-
-  // First keystroke handler: when not already searching, a printable character
-  // (with no Ctrl/Alt/Meta held) opens the search bar seeded with that char.
-  KeyEventResult _onPageKey(FocusNode _, KeyEvent event) {
-    if (_searching || event is! KeyDownEvent) return KeyEventResult.ignored;
-    if (HardwareKeyboard.instance.isControlPressed ||
-        HardwareKeyboard.instance.isAltPressed ||
-        HardwareKeyboard.instance.isMetaPressed) {
-      return KeyEventResult.ignored;
-    }
-    final ch = event.character;
-    // A single printable, non-control character (filters out Enter, Tab, etc.).
-    if (ch == null || ch.length != 1 || ch.codeUnitAt(0) < 0x20) {
-      return KeyEventResult.ignored;
-    }
-    _openSearch(seed: ch);
-    return KeyEventResult.handled;
   }
 
   void _snack(String message) {
@@ -365,15 +313,15 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     );
   }
 
-  /// The live filter field, shown above the station list while [_searching].
+  /// The live filter field, shown above the station list while [searching].
   Widget _searchBar() {
     return Padding(
       padding: const EdgeInsets.only(bottom: 4),
       child: TextField(
-        controller: _searchController,
-        focusNode: _searchFocus,
+        controller: searchController,
+        focusNode: searchFocus,
         autofocus: true,
-        onChanged: (v) => setState(() => _query = v),
+        onChanged: setQuery,
         textInputAction: TextInputAction.search,
         decoration: InputDecoration(
           isDense: true,
@@ -383,7 +331,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
           suffixIcon: IconButton(
             icon: const Icon(Icons.close),
             tooltip: 'Clear search',
-            onPressed: _closeSearch,
+            onPressed: closeSearch,
           ),
         ),
       ),
@@ -395,8 +343,8 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
     final playing = _session.isPlaying;
     // Case-insensitive substring match on the station name (hoist the query's
     // toLowerCase out of the per-station closure — P11).
-    final q = _query.toLowerCase();
-    final visible = _query.isEmpty
+    final q = query.toLowerCase();
+    final visible = query.isEmpty
         ? _stations
         : _stations.where((s) => s.name.toLowerCase().contains(q)).toList();
     final streamInfo = playing ? _session.streamInfoLine : null;
@@ -412,7 +360,7 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
           IconButton(
             icon: const Icon(Icons.search),
             tooltip: 'Filter stations',
-            onPressed: _openSearch,
+            onPressed: openSearch,
           ),
           IconButton(
             icon: const Icon(Icons.history),
@@ -475,12 +423,12 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
       // focused); the page-level Focus catches the first keystroke to open it.
       body: CallbackShortcuts(
         bindings: {
-          const SingleActivator(LogicalKeyboardKey.escape): _closeSearch,
+          const SingleActivator(LogicalKeyboardKey.escape): closeSearch,
         },
         child: Focus(
-          focusNode: _pageFocus,
+          focusNode: pageFocus,
           autofocus: true,
-          onKeyEvent: _onPageKey,
+          onKeyEvent: onPageKey,
           child: Padding(
             padding: const EdgeInsets.all(16),
             child: Column(
@@ -638,12 +586,12 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
                 ],
                 const SizedBox(height: 16),
                 const Divider(),
-                if (_searching) _searchBar(),
+                if (searching) _searchBar(),
                 Expanded(
-                  child: (_query.isNotEmpty && visible.isEmpty)
+                  child: (query.isNotEmpty && visible.isEmpty)
                       ? Center(
                           child: Text(
-                            'No stations match “$_query”.',
+                            'No stations match “$query”.',
                             style: TextStyle(
                               color: Theme.of(context)
                                   .colorScheme
@@ -655,9 +603,9 @@ class _PlayerPageState extends State<PlayerPage> with WindowListener {
                       : ListView.builder(
                           // Trailing add/import/export rows only when not filtering,
                           // so a query shows just the matching stations.
-                          itemCount: visible.length + (_query.isEmpty ? 3 : 0),
+                          itemCount: visible.length + (query.isEmpty ? 3 : 0),
                           itemBuilder: (context, i) {
-                            if (_query.isEmpty) {
+                            if (query.isEmpty) {
                               switch (i - visible.length) {
                                 case 0:
                                   return _actionTile(Icons.add,

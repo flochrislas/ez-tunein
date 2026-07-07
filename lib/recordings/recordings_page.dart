@@ -125,7 +125,7 @@ class _RecordingsPageState extends State<RecordingsPage>
     super.dispose();
   }
 
-  String _fileName(File f) => f.path.split(Platform.pathSeparator).last;
+  String _fileName(File f) => baseName(f.path);
 
   ({String artist, String title}) _parts(File f) {
     final name = _fileName(f);

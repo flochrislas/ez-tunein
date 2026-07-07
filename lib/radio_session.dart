@@ -240,7 +240,7 @@ class RadioSession extends ChangeNotifier implements AudioModeDriver {
         _notify();
         _publishRadio(); // clear "recording" from the card
         if (result.path != null) {
-          onMessage?.call('Saved recording: ${_baseName(result.path!)}');
+          onMessage?.call('Saved recording: ${baseName(result.path!)}');
         } else if (result.error != null) {
           onMessage?.call('Recording failed: ${result.error}');
         }
@@ -282,7 +282,7 @@ class RadioSession extends ChangeNotifier implements AudioModeDriver {
     final result = await _recorder.onStreamStopped();
     if (session != _playSession) return; // superseded while finalizing
     if (result.path != null) {
-      onMessage?.call('Saved recording: ${_baseName(result.path!)}');
+      onMessage?.call('Saved recording: ${baseName(result.path!)}');
     } else if (result.error != null) {
       onMessage?.call('Recording failed: ${result.error}');
     }
@@ -416,7 +416,7 @@ class RadioSession extends ChangeNotifier implements AudioModeDriver {
     // Nothing playing now ⇒ tear the media session down.
     audioHandler.detach(this);
     if (result.path != null) {
-      onMessage?.call('Saved recording: ${_baseName(result.path!)}');
+      onMessage?.call('Saved recording: ${baseName(result.path!)}');
     } else if (result.error != null) {
       onMessage?.call('Recording failed: ${result.error}');
     }
@@ -476,7 +476,7 @@ class RadioSession extends ChangeNotifier implements AudioModeDriver {
       _manualRecording = false;
       _notify();
       onMessage?.call(result.path != null
-          ? 'Saved recording: ${_baseName(result.path!)}'
+          ? 'Saved recording: ${baseName(result.path!)}'
           : 'Recording failed: ${result.error}');
     }
     _publishRadio(); // refresh the card for the new track / cleared state
@@ -548,7 +548,7 @@ class RadioSession extends ChangeNotifier implements AudioModeDriver {
     _notify();
     _publishRadio();
     if (result.path != null) {
-      onMessage?.call('Saved recording: ${_baseName(result.path!)}');
+      onMessage?.call('Saved recording: ${baseName(result.path!)}');
     } else if (result.error != null) {
       onMessage?.call('Recording failed: ${result.error}');
     } else {
@@ -628,9 +628,8 @@ class RadioSession extends ChangeNotifier implements AudioModeDriver {
   /// A filename-safe `YYYY-MM-DD HH.MM` stamp for naming title-less recordings.
   String _recStamp() {
     final n = DateTime.now();
-    String two(int x) => x.toString().padLeft(2, '0');
-    return '${n.year}-${two(n.month)}-${two(n.day)} '
-        '${two(n.hour)}.${two(n.minute)}';
+    return '${n.year}-${pad2(n.month)}-${pad2(n.day)} '
+        '${pad2(n.hour)}.${pad2(n.minute)}';
   }
 
   /// Update the current station's label after the user edits it (playback keeps
@@ -681,8 +680,6 @@ class RadioSession extends ChangeNotifier implements AudioModeDriver {
 
   @override
   Future<void> driverSkipNext() async {}
-
-  String _baseName(String path) => path.split(Platform.pathSeparator).last;
 
   @override
   void dispose() {

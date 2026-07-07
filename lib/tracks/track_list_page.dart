@@ -11,6 +11,7 @@ import '../csv_utils.dart';
 import '../models/saved_track.dart';
 import '../storage_paths.dart';
 import '../track_utils.dart';
+import '../type_to_search.dart';
 
 /// A dark, sortable, searchable table of tracks read from a CSV file. Used for
 /// both the saved-tracks list and the auto-recorded play history — they differ
@@ -38,19 +39,16 @@ class TrackListPage extends StatefulWidget {
   State<TrackListPage> createState() => _TrackListPageState();
 }
 
-class _TrackListPageState extends State<TrackListPage> {
+class _TrackListPageState extends State<TrackListPage>
+    with TypeToSearch<TrackListPage> {
   List<SavedTrack> _tracks = [];
   bool _loading = true;
   int? _sortColumn;
   bool _ascending = true;
 
-  // Type-to-search filter (same UX as the station list): matches artist, title,
-  // or station, case-insensitive substring.
-  String _query = '';
-  bool _searching = false;
-  final _searchController = TextEditingController();
-  final _searchFocus = FocusNode();
-  final _pageFocus = FocusNode();
+  // Type-to-search filter (query/searching/controllers/keystroke handling) comes
+  // from the TypeToSearch mixin; it matches artist/title/station (see
+  // _recomputeVisible), and onQueryChanged re-filters + resets the paging window.
 
   // History only: whether the player is currently logging played songs.
   bool _logging = true;
@@ -74,10 +72,15 @@ class _TrackListPageState extends State<TrackListPage> {
   @override
   void dispose() {
     _scrollController.dispose();
-    _searchController.dispose();
-    _searchFocus.dispose();
-    _pageFocus.dispose();
+    disposeSearch();
     super.dispose();
+  }
+
+  // Re-filter and reset the paging window whenever the query changes (mixin).
+  @override
+  void onQueryChanged() {
+    _recomputeVisible();
+    _resetWindow();
   }
 
   // Grow the window when the user scrolls within ~300px of the bottom.
@@ -179,11 +182,11 @@ class _TrackListPageState extends State<TrackListPage> {
   List<SavedTrack> _visible = [];
 
   void _recomputeVisible() {
-    if (_query.isEmpty) {
+    if (query.isEmpty) {
       _visible = _tracks;
       return;
     }
-    final q = _query.toLowerCase();
+    final q = query.toLowerCase();
     _visible = _tracks
         .where((t) =>
             t.artistLower.contains(q) ||
@@ -192,57 +195,14 @@ class _TrackListPageState extends State<TrackListPage> {
         .toList();
   }
 
-  void _openSearch({String? seed}) {
-    setState(() {
-      _searching = true;
-      if (seed != null) {
-        _searchController.text = seed;
-        _searchController.selection =
-            TextSelection.collapsed(offset: seed.length);
-        _query = seed;
-        _recomputeVisible();
-      }
-    });
-    _searchFocus.requestFocus();
-  }
-
-  void _closeSearch() {
-    setState(() {
-      _searching = false;
-      _query = '';
-      _searchController.clear();
-      _recomputeVisible();
-    });
-    _pageFocus.requestFocus();
-  }
-
-  KeyEventResult _onPageKey(FocusNode _, KeyEvent event) {
-    if (_searching || event is! KeyDownEvent) return KeyEventResult.ignored;
-    if (HardwareKeyboard.instance.isControlPressed ||
-        HardwareKeyboard.instance.isAltPressed ||
-        HardwareKeyboard.instance.isMetaPressed) {
-      return KeyEventResult.ignored;
-    }
-    final ch = event.character;
-    if (ch == null || ch.length != 1 || ch.codeUnitAt(0) < 0x20) {
-      return KeyEventResult.ignored;
-    }
-    _openSearch(seed: ch);
-    return KeyEventResult.handled;
-  }
-
   Widget _searchBar() {
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
       child: TextField(
-        controller: _searchController,
-        focusNode: _searchFocus,
+        controller: searchController,
+        focusNode: searchFocus,
         autofocus: true,
-        onChanged: (v) => setState(() {
-          _query = v;
-          _recomputeVisible();
-          _resetWindow();
-        }),
+        onChanged: setQuery,
         textInputAction: TextInputAction.search,
         decoration: InputDecoration(
           isDense: true,
@@ -252,7 +212,7 @@ class _TrackListPageState extends State<TrackListPage> {
           suffixIcon: IconButton(
             icon: const Icon(Icons.close),
             tooltip: 'Clear search',
-            onPressed: _closeSearch,
+            onPressed: closeSearch,
           ),
         ),
       ),
@@ -472,7 +432,7 @@ class _TrackListPageState extends State<TrackListPage> {
             IconButton(
               icon: const Icon(Icons.search),
               tooltip: 'Filter',
-              onPressed: _tracks.isEmpty ? null : _openSearch,
+              onPressed: _tracks.isEmpty ? null : openSearch,
             ),
             // The compact phone list has no column headers, so sorting moves
             // here. (record = (columnIndex, ascending) — see _onSort.)
@@ -506,12 +466,12 @@ class _TrackListPageState extends State<TrackListPage> {
         // keystroke to open it (same type-to-search UX as the station list).
         body: CallbackShortcuts(
           bindings: {
-            const SingleActivator(LogicalKeyboardKey.escape): _closeSearch,
+            const SingleActivator(LogicalKeyboardKey.escape): closeSearch,
           },
           child: Focus(
-            focusNode: _pageFocus,
+            focusNode: pageFocus,
             autofocus: true,
-            onKeyEvent: _onPageKey,
+            onKeyEvent: onPageKey,
             child: _buildBody(context),
           ),
         ),
@@ -524,7 +484,7 @@ class _TrackListPageState extends State<TrackListPage> {
     return Column(
       children: [
         if (widget.isHistory) _historyControls(context),
-        if (_searching) _searchBar(),
+        if (searching) _searchBar(),
         Expanded(child: _buildListArea(context)),
       ],
     );
@@ -536,7 +496,7 @@ class _TrackListPageState extends State<TrackListPage> {
     if (visible.isEmpty) {
       return Center(
         child: Text(
-          'No entries match “$_query”.',
+          'No entries match “$query”.',
           style: TextStyle(
             color: Theme.of(context).colorScheme.onSurfaceVariant,
             fontStyle: FontStyle.italic,

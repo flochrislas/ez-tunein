@@ -15,14 +15,23 @@
   return (artist: '', title: raw);
 }
 
+/// Zero-pad an integer to two digits (e.g. 3 → "03").
+String pad2(int n) => n.toString().padLeft(2, '0');
+
+/// The last path segment of [path] (handles both `/` and `\` separators, so it's
+/// platform-agnostic and dependency-free).
+String baseName(String path) {
+  final i = path.lastIndexOf(RegExp(r'[/\\]'));
+  return i < 0 ? path : path.substring(i + 1);
+}
+
 /// Format an ISO-8601 timestamp as `YYYY-MM-DD HH:MM` for the track tables.
 /// Returns the input unchanged if it doesn't parse.
 String fmtDateTime(String iso) {
   final dt = DateTime.tryParse(iso);
   if (dt == null) return iso;
-  String two(int n) => n.toString().padLeft(2, '0');
-  return '${dt.year}-${two(dt.month)}-${two(dt.day)} '
-      '${two(dt.hour)}:${two(dt.minute)}';
+  return '${dt.year}-${pad2(dt.month)}-${pad2(dt.day)} '
+      '${pad2(dt.hour)}:${pad2(dt.minute)}';
 }
 
 /// Format a duration as `M:SS` (or `H:MM:SS` for an hour or more) for the

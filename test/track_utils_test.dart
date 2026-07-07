@@ -2,6 +2,25 @@ import 'package:ez_tunein/track_utils.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  group('pad2', () {
+    test('zero-pads to two digits', () {
+      expect(pad2(3), '03');
+      expect(pad2(12), '12');
+      expect(pad2(0), '00');
+    });
+  });
+
+  group('baseName', () {
+    test('returns the last segment for / and \\ paths', () {
+      expect(baseName('/home/u/Music/Song.mp3'), 'Song.mp3');
+      expect(baseName(r'C:\Users\u\Song.mp3'), 'Song.mp3');
+    });
+
+    test('returns the input when there is no separator', () {
+      expect(baseName('Song.mp3'), 'Song.mp3');
+    });
+  });
+
   group('splitArtistTitle', () {
     test('splits on the first " - "', () {
       final r = splitArtistTitle('Daft Punk - Aerodynamic');
