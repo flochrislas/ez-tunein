@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -128,6 +129,22 @@ class _PlayerPageState extends State<PlayerPage>
     setState(() => _stations.addAll(merged.added));
     await _saveStations();
     _snack('Added ${merged.added.length} station(s).');
+  }
+
+  /// Plays a random station from the list. Avoids repeating the one already
+  /// playing (unless it's the only station) so each tap actually changes it.
+  void _pickRandom() {
+    if (_stations.isEmpty) {
+      _snack('No stations to pick from.');
+      return;
+    }
+    var pool = _stations;
+    final current = _session.current;
+    if (current != null && _stations.length > 1) {
+      pool = _stations.where((s) => s.url != current.url).toList();
+    }
+    final station = pool[Random().nextInt(pool.length)];
+    _session.play(station);
   }
 
   Future<void> _editStation(Station old) async {
@@ -310,6 +327,21 @@ class _PlayerPageState extends State<PlayerPage>
         style: TextStyle(color: muted, fontStyle: FontStyle.italic),
       ),
       onTap: onTap,
+    );
+  }
+
+  /// A prominent "surprise me" row at the top of the list — each tap tunes to a
+  /// random station (distinct from the current one). Uses the accent colour so
+  /// it reads as a primary action, unlike the dimmed [_actionTile] rows.
+  Widget _pickRandomTile() {
+    final accent = Theme.of(context).colorScheme.primary;
+    return ListTile(
+      leading: Icon(Icons.shuffle, color: accent),
+      title: Text(
+        'Pick a random station',
+        style: TextStyle(color: accent, fontWeight: FontWeight.w600),
+      ),
+      onTap: _pickRandom,
     );
   }
 
@@ -601,12 +633,19 @@ class _PlayerPageState extends State<PlayerPage>
                           ),
                         )
                       : ListView.builder(
-                          // Trailing add/import/export rows only when not filtering,
-                          // so a query shows just the matching stations.
-                          itemCount: visible.length + (query.isEmpty ? 3 : 0),
+                          // A leading "Pick random" row and trailing
+                          // add/import/export rows, only when not filtering, so
+                          // a query shows just the matching stations.
+                          itemCount: visible.length + (query.isEmpty ? 4 : 0),
                           itemBuilder: (context, i) {
+                            // Leading action row (index 0 when unfiltered).
+                            final lead = query.isEmpty ? 1 : 0;
+                            if (query.isEmpty && i == 0) {
+                              return _pickRandomTile();
+                            }
+                            final si = i - lead; // index into the station list
                             if (query.isEmpty) {
-                              switch (i - visible.length) {
+                              switch (si - visible.length) {
                                 case 0:
                                   return _actionTile(Icons.add,
                                       'Add a new radio station…', _addStation);
@@ -622,7 +661,7 @@ class _PlayerPageState extends State<PlayerPage>
                                       _exportStations);
                               }
                             }
-                            final s = visible[i];
+                            final s = visible[si];
                             return StationTile(
                               station: s,
                               isCurrent: _session.current?.url == s.url,
