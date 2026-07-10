@@ -187,7 +187,9 @@ the binary to confirm runtime behaviour (audio/UI can't be observed here).
 
 ## Verification etiquette
 
-This environment can compile but cannot play audio or show the GUI. After a
+This environment can compile but cannot play audio, and doesn't show the GUI by
+default (though it *can* be rendered headlessly under `Xvfb` — see **Taking README
+screenshots** below). After a
 change: run `dart format lib test` (CI fails on unformatted code — see below),
 run `analyze`, run `flutter test`, run `build linux`, then ask the user to run
 the binary and report what they see. To inspect live stream behaviour (e.g. ICY
@@ -197,6 +199,50 @@ proven approach.
 **CI gate:** `.github/workflows/ci.yml` (and the release `verify` job) run
 `dart format --output=none --set-exit-if-changed lib test`, `flutter analyze`,
 and `flutter test` — keep all three green.
+
+## Taking README screenshots (headless, self-serve)
+
+The README embeds three shots in `doc/screenshots/` — `player.png`,
+`recording-settings.png`, `recordings-library.png` (filenames are fixed; see
+[`doc/screenshots/README.md`](doc/screenshots/README.md) for what each must show).
+The GUI **can** be captured here even though the live desktop session is Wayland
+*and* usually locked (a GTK app won't map onto `:0` and the screen is blanked).
+Drive a **private `Xvfb` display** instead — no window manager needed (undecorated
+windows are cleaner anyway). All of this needs network (ICY metadata) + writes the
+project, so run it **with the sandbox disabled**. Tools present on this machine:
+`Xvfb`, `xdotool`, ImageMagick (`import`/`convert`), `ffmpeg`.
+
+```bash
+# 1. Build + launch on a private virtual display (portrait window ≈ 620x940)
+Xvfb :99 -screen 0 1000x1100x24 -nolisten tcp &
+cd ~/code/radio && ~/flutter/bin/flutter build linux --debug   # or reuse the built binary
+DISPLAY=:99 GDK_BACKEND=x11 ./build/linux/x64/debug/bundle/ez_tunein &
+sleep 8
+export DISPLAY=:99
+WID=$(xdotool search --name "EZ-TuneIn Radio" | head -1)
+xdotool windowsize $WID 620 940            # keep all three shots the same size
+
+# 2. Drive the UI with xdotool (coords are window-relative; move mouse away after
+#    each click so no hover-highlight / tooltip bleeds into the shot), then capture:
+xdotool mousemove --window $WID <x> <y> click 1 ; xdotool mousemove --window $WID 605 920
+import -window $WID /tmp/claude/shot.png    # per-window grab (root-window grab fails)
+
+# 3. Optimize into place (flat dark UI → PNG8/256 colours is lossless-looking, ~20-30 KB)
+convert /tmp/claude/shot.png -strip -colors 256 -depth 8 PNG8:doc/screenshots/player.png
+
+# 4. Clean up
+pkill -f bundle/ez_tunein ; kill -9 %1   # the Xvfb job
+```
+
+Content to set up before capturing: click a **good-metadata station** (SwissGroove
+/ a SomaFM channel) and wait ~10 s for the live ICY title; turn **Buffer the stream
+on** in Settings so the **Record** button shows (and to capture the buffer-size
+guide); the recordings library reads real files from `~/Downloads` (the default
+recording folder) — drop a couple of `Artist - Title.mp3` files there if it's empty,
+and tap one to reveal the seek bar. **Read each PNG back to verify** before
+committing — no human is watching the run. The accent colour is whatever's in the
+saved `accent_color` pref (persists between launches); keep it consistent across
+all three.
 
 ## Not done yet (see implementation-notes for the full list)
 
