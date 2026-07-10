@@ -7,12 +7,13 @@ fade toward the edges, and a triangular wedge at the bottom is left blank —
 matching the reference art. The transparent boombox foreground is then
 cropped to its bounding box and scaled to fill the icon, composited on top to
 produce icon.png / app_icon_256.png; icon_background.png (the Android
-adaptive-icon background) is the bare pattern.
+adaptive-icon background) is the bare pattern, and icon_adaptive_foreground.png
+is the boombox scaled to sit in the adaptive safe zone (bigger than the raw
+source, but with margin so launcher masks don't crop it). icon_foreground.png
+stays the untouched source art so re-running is idempotent.
 
 Run from the repo root:  python3 script/make_icon_bg.py
 """
-import math
-
 from PIL import Image, ImageDraw
 
 ICON_DIR = "assets/icon"
@@ -31,7 +32,8 @@ FADE_POW = 0.78      # <1 fades faster (stronger dissolve toward the edge)
 STROKE_IN, STROKE_OUT = 0.0090, 0.0026  # ring width: wide near centre → thin
 
 # Boombox ------------------------------------------------------------------
-FILL = 0.98          # scale the boombox to this fraction of the canvas
+FILL = 1.00          # flat icon: boombox fills the whole canvas (width-limited)
+FILL_ADAPTIVE = 0.82  # Android adaptive foreground: bigger, but inside the mask
 
 
 def make_background(size: int) -> Image.Image:
@@ -64,11 +66,12 @@ def make_background(size: int) -> Image.Image:
     return img.resize((size, size), Image.LANCZOS)
 
 
-def big_boombox(size: int) -> Image.Image:
-    """Foreground cropped to the boombox and scaled to fill the canvas."""
+def boombox(size: int, fill: float) -> Image.Image:
+    """Source foreground cropped to the boombox, scaled to `fill` of the canvas,
+    centred on a transparent canvas."""
     fg = Image.open(f"{ICON_DIR}/icon_foreground.png").convert("RGBA")
     crop = fg.crop(fg.getbbox())
-    scale = min(FILL * size / crop.width, FILL * size / crop.height)
+    scale = min(fill * size / crop.width, fill * size / crop.height)
     w, h = round(crop.width * scale), round(crop.height * scale)
     crop = crop.resize((w, h), Image.LANCZOS)
     canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
@@ -80,12 +83,16 @@ def main() -> None:
     bg = make_background(SIZE)
     bg.save(f"{ICON_DIR}/icon_background.png")
 
+    # Android adaptive foreground: enlarged boombox, transparent background.
+    boombox(SIZE, FILL_ADAPTIVE).save(f"{ICON_DIR}/icon_adaptive_foreground.png")
+
     composed = bg.convert("RGBA")
-    composed.alpha_composite(big_boombox(SIZE))
+    composed.alpha_composite(boombox(SIZE, FILL))
     composed = composed.convert("RGB")
     composed.save(f"{ICON_DIR}/icon.png")
     composed.resize((256, 256), Image.LANCZOS).save(f"{ICON_DIR}/app_icon_256.png")
-    print("wrote icon_background.png, icon.png, app_icon_256.png")
+    print("wrote icon_background.png, icon_adaptive_foreground.png, "
+          "icon.png, app_icon_256.png")
 
 
 if __name__ == "__main__":
