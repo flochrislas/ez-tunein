@@ -81,6 +81,8 @@ Runs on **Windows**, **macOS**, **Linux**, and **Android**.
   duplicates are skipped). Both live at the bottom of the station list.
 - **Find a station fast** — just start typing to filter the list by name, or tap
   the **search** icon in the top bar. Press **Esc** (or the **✕**) to clear.
+- **Feeling lucky?** — tap **Pick a random station** at the top of the list to let
+  EZ-TuneIn choose one for you.
 - **Make it yours** — pick an **accent color** in **Settings** (preset swatches
   or exact R/G/B); it re-themes the app instantly.
 - **Remembers your setup** — volume, accent color, and (on desktop) the window
