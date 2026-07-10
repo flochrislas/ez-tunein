@@ -26,6 +26,7 @@ import '../storage_paths.dart';
 import '../tracks/track_list_page.dart';
 import '../type_to_search.dart';
 import '../url_utils.dart';
+import 'autoradio_display.dart';
 
 class PlayerPage extends StatefulWidget {
   const PlayerPage({super.key});
@@ -518,38 +519,44 @@ class _PlayerPageState extends State<PlayerPage>
                   ),
                   child: Card(
                     margin: EdgeInsets.zero,
-                    child: Padding(
-                      padding: const EdgeInsets.all(20),
-                      child: Column(
-                        children: [
-                          Text(
-                            playing ? _session.current!.name : 'Stopped',
-                            style: Theme.of(context).textTheme.titleMedium,
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            _session.nowPlayingText,
-                            style: Theme.of(context).textTheme.headlineSmall,
-                            textAlign: TextAlign.center,
-                          ),
-                          if (streamInfo != null) ...[
-                            const SizedBox(height: 6),
-                            Text(
-                              streamInfo,
-                              textAlign: TextAlign.center,
-                              style: Theme.of(context)
-                                  .textTheme
-                                  .bodySmall
-                                  ?.copyWith(
-                                    color: Theme.of(context)
-                                        .colorScheme
-                                        .onSurfaceVariant,
+                    // Stopped ⇒ the vector autoradio faceplate (nicer than a
+                    // bare "Stopped"); playing ⇒ the station + now-playing text.
+                    child: !playing
+                        ? const AutoradioDisplay()
+                        : Padding(
+                            padding: const EdgeInsets.all(20),
+                            child: Column(
+                              children: [
+                                Text(
+                                  _session.current!.name,
+                                  style:
+                                      Theme.of(context).textTheme.titleMedium,
+                                ),
+                                const SizedBox(height: 8),
+                                Text(
+                                  _session.nowPlayingText,
+                                  style:
+                                      Theme.of(context).textTheme.headlineSmall,
+                                  textAlign: TextAlign.center,
+                                ),
+                                if (streamInfo != null) ...[
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    streamInfo,
+                                    textAlign: TextAlign.center,
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .bodySmall
+                                        ?.copyWith(
+                                          color: Theme.of(context)
+                                              .colorScheme
+                                              .onSurfaceVariant,
+                                        ),
                                   ),
+                                ],
+                              ],
                             ),
-                          ],
-                        ],
-                      ),
-                    ),
+                          ),
                   ),
                 ),
                 const SizedBox(height: 12),
