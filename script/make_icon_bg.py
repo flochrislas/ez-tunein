@@ -27,9 +27,9 @@ FIRST = 1.7          # first ring radius as a multiple of the dot radius
 SPACING = 0.042      # constant gap between rings (fraction of canvas)
 MAX_R = 0.80         # keep drawing until this radius (runs off the canvas)
 WEDGE_HALF = 27      # half-angle (deg) of the blank wedge at the bottom
-GRAY_IN, GRAY_OUT = 10, 232   # ring shade: dark near centre → light at edge
-FADE_POW = 0.78      # <1 fades faster (stronger dissolve toward the edge)
-STROKE_IN, STROKE_OUT = 0.0090, 0.0026  # ring width: wide near centre → thin
+GRAY_IN, GRAY_OUT = 70, 246   # ring shade: already-faded centre → very light edge
+FADE_POW = 0.62      # <1 fades faster (stronger dissolve toward the edge)
+STROKE_IN, STROKE_OUT = 0.0125, 0.0024  # ring width: wide near centre → thin
 
 # Boombox ------------------------------------------------------------------
 FILL = 1.00          # flat icon: boombox fills the whole canvas (width-limited)
@@ -49,7 +49,8 @@ def make_background(size: int) -> Image.Image:
     # complement of the downward wedge so a blank triangle is left at bottom.
     start, end = 90 + WEDGE_HALF, 450 - WEDGE_HALF
 
-    d.ellipse([cx - dot_r, cy - dot_r, cx + dot_r, cy + dot_r], fill="black")
+    dot_shade = (GRAY_IN, GRAY_IN, GRAY_IN)  # match the innermost rings (not pure black)
+    d.ellipse([cx - dot_r, cy - dot_r, cx + dot_r, cy + dot_r], fill=dot_shade)
 
     # Constant spacing between rings; both the *shade* and the *stroke width*
     # taper with radius, so the circles look like they dissolve toward the edge.
