@@ -212,14 +212,27 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
+  /// Section heading: a size up, semi-bold, in the scheme's `primary`. Primary —
+  /// not the raw accent — because M3 tone-maps the seed to a light tone for the
+  /// dark theme, so even the dark presets stay readable on the near-black page
+  /// (it still re-tints live with the accent, like the sliders).
+  Widget _heading(String text) => Text(
+        text,
+        style: Theme.of(context).textTheme.titleMedium?.copyWith(
+              fontSize: 17,
+              fontWeight: FontWeight.w600,
+              color: Theme.of(context).colorScheme.primary,
+            ),
+      );
+
   Widget _buildSettings(Color muted, bool hasDir) {
     final r = _chan(_accent.r), g = _chan(_accent.g), b = _chan(_accent.b);
     return ListView(
       padding: const EdgeInsets.all(8),
       children: [
-        const ListTile(
-          title: Text('Accent color'),
-          subtitle: Text('Tints the sliders, switches, and buttons.'),
+        ListTile(
+          title: _heading('Accent color'),
+          subtitle: const Text('Tints the sliders, switches, and buttons.'),
         ),
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
@@ -235,15 +248,28 @@ class _SettingsPageState extends State<SettingsPage> {
         _channelSlider('B', b, (v) => Color.fromARGB(255, r, g, v)),
         const Divider(),
         SwitchListTile(
-          title: const Text('Buffer the stream'),
-          subtitle: const Text(
-              'Required to record. When off, the Record button is hidden.'),
+          title: _heading('Buffer the stream'),
+          // This is the one switch that silently hides the Record button, so the
+          // dependency is called out in bold error red rather than blending into
+          // the muted subtitle text.
+          subtitle: Text.rich(
+            TextSpan(children: [
+              TextSpan(
+                text: 'Required to record.',
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.error,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const TextSpan(text: ' When off, the Record button is hidden.'),
+            ]),
+          ),
           value: _buffering,
           onChanged: _setBuffering,
         ),
         const Divider(),
         ListTile(
-          title: const Text('Buffer size'),
+          title: _heading('Buffer size'),
           subtitle: Text(
             '$_bufferMb MB — how far back into a song you can reach when you '
             'hit Record.',
@@ -263,7 +289,7 @@ class _SettingsPageState extends State<SettingsPage> {
         _bufferGuide(muted),
         const Divider(),
         ListTile(
-          title: const Text('Lead-in for stations without track names'),
+          title: _heading('Lead-in for stations without track names'),
           subtitle: Text(
             'Some stations broadcast no song titles. There, Record keeps the '
             'last ${_leadLabel(_leadSeconds)} before you tapped (then everything '
@@ -290,7 +316,7 @@ class _SettingsPageState extends State<SettingsPage> {
         ),
         const Divider(),
         ListTile(
-          title: const Text('Save recordings to'),
+          title: _heading('Save recordings to'),
           subtitle: Text(
             hasDir
                 ? _dir!
