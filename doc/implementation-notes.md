@@ -191,7 +191,8 @@ Key symbols:
   - `rec_buffering` (bool, default `true` — buffer the stream; off ⇒ no Record button)
   - `rec_buffer_mb` (int, default `35`, capped `128` — buffer cap / rewind window)
   - `rec_lead_seconds` (int, default `60`; -1 = whole buffer — manual-recording lead-in cap)
-  - `rec_dir` (string, optional — recording output folder; absent ⇒ Downloads)
+  - `rec_dir` (string, optional — recording output folder; absent ⇒
+    `<Downloads>/EZ-TuneIn`)
   - `rec_never_stops` (bool, default `false` — recordings library auto-advances)
   - `rec_randomize` (bool, default `false` — recordings library shuffles)
 - **Saved tracks CSV:** `getApplicationDocumentsDirectory()/radio_saved_tracks.csv`
@@ -501,10 +502,19 @@ current track, so "record" just commits the buffer and keeps going.
     starts/stops live buffering if the toggle flipped. The buffer-size slider carries a `_bufferGuide` caption — the MB
   cost of one minute of MP3 at 128/256/320 kbps, and how many minutes the chosen
   size rewinds at each — so the number isn't an opaque "MB". Output folder
-  defaults to `getDownloadsDirectory()` on desktop
-  (chosen via `file_picker`'s `getDirectoryPath`), falling back to the app
-  documents dir; on Android it always uses the app folder (an arbitrary user folder
-  needs SAF/MediaStore — not done).
+  defaults to `<Downloads>/EZ-TuneIn` on desktop (`getDownloadsDirectory()` +
+  `recSubdirName`; chosen via `file_picker`'s `getDirectoryPath`), falling back to
+  `<Documents>/EZ-TuneIn` when the platform reports no Downloads folder — the
+  subfolder applies to *both*, since Documents is shared too; on Android it always
+  uses the (app-private) app folder, bare (an arbitrary
+  user folder needs SAF/MediaStore — not done). The subfolder is deliberate: the
+  library lists **every** audio file in the output folder, so recording straight
+  into a shared Downloads folder showed (and offered to delete) unrelated mp3s.
+  It's created lazily — by the recorder on the first save, or by the library's
+  "open folder" button. The "Save recordings to" row labels the default with the
+  **resolved** path from `defaultRecordingsDir()` (the same helper `recordingsDir()`
+  falls through to), so it can't claim `Downloads/…` on a machine that landed in
+  `Documents/…`.
 
 ### Recordings library
 

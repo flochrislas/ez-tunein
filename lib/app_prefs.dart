@@ -39,7 +39,8 @@ const stationsKey = 'stations';
 // same single-cached-instance trick as the history toggle above).
 //  - rec_buffering: whether the stream is buffered (off ⇒ no Record button).
 //  - rec_buffer_mb: buffer cap in MB (the "rewind" window before recording).
-//  - rec_dir:       output folder; null/empty ⇒ the OS Downloads folder.
+//  - rec_dir:       output folder; null/empty ⇒ Downloads/EZ-TuneIn on desktop,
+//                   the app folder on mobile (see recordingsDir()).
 const recBufferingKey = 'rec_buffering';
 const recBufferMbKey = 'rec_buffer_mb';
 // rec_dir lives in storage_paths.dart (recDirKey) since recordingsDir() reads it.

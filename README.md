@@ -91,8 +91,9 @@ Runs on **Windows**, **macOS**, **Linux**, and **Android**.
 Your saved tracks are written to `radio_saved_tracks.csv` and the play history to
 `radio_history.csv` (same columns) — on desktop both live in your **Documents**
 folder, so they're easy to open in a spreadsheet (on Android they're app-private
-files you browse via the in-app views). **Recorded songs** go to your
-**Downloads** folder by default (change it in Recording settings); on Android they
+files you browse via the in-app views). **Recorded songs** go to
+**Downloads/EZ-TuneIn** by default — its own folder, so the in-app library only
+ever lists what you recorded (change it in Recording settings); on Android they
 save to the app folder.
 
 ## How to install

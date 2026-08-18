@@ -369,7 +369,10 @@ class _RecordingsPageState extends State<RecordingsPage>
   /// rename / delete files directly. Best-effort, desktop only.
   Future<void> _openFolder() async {
     try {
-      await revealInFileManager((await recordingsDir()).path);
+      final dir = await recordingsDir();
+      // The default folder is ours and only appears with the first recording.
+      if (!await dir.exists()) await dir.create(recursive: true);
+      await revealInFileManager(dir.path);
     } catch (e) {
       _snack('Could not open the folder: $e');
     }

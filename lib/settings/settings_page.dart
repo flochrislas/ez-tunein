@@ -26,7 +26,8 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _buffering = true;
   int _bufferMb = recBufferMbDefault;
   int _leadSeconds = recLeadSecondsDefault; // -1 ⇒ whole buffer
-  String? _dir; // null/empty ⇒ Downloads (desktop) / app folder (mobile)
+  String? _dir; // null/empty ⇒ _defaultDir
+  String? _defaultDir; // resolved default path, for the "(default)" label
   Color _accent = const Color(defaultAccentValue);
   String _version = ''; // app version string, e.g. "0.9.3" (from the bundle)
 
@@ -39,9 +40,13 @@ class _SettingsPageState extends State<SettingsPage> {
   Future<void> _load() async {
     final prefs = await SharedPreferences.getInstance();
     final info = await PackageInfo.fromPlatform();
+    // Resolved rather than hard-coded: the default sits under Documents when the
+    // platform reports no Downloads folder.
+    final defaultDir = await defaultRecordingsDir();
     if (!mounted) return;
     setState(() {
       _prefs = prefs;
+      _defaultDir = defaultDir.path;
       _buffering = prefs.getBool(recBufferingKey) ?? true;
       _bufferMb = (prefs.getInt(recBufferMbKey) ?? recBufferMbDefault)
           .clamp(5, recBufferMbMax);
@@ -290,7 +295,7 @@ class _SettingsPageState extends State<SettingsPage> {
             hasDir
                 ? _dir!
                 : (isDesktop
-                    ? 'Downloads folder (default)'
+                    ? '${_defaultDir ?? ''} (default)'
                     : 'App folder — share recordings from the file manager'),
           ),
           trailing: isDesktop

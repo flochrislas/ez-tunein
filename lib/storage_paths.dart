@@ -10,23 +10,44 @@ import 'package:shared_preferences/shared_preferences.dart';
 final bool isDesktop =
     Platform.isLinux || Platform.isWindows || Platform.isMacOS;
 
-/// Output folder for recordings; null/empty ⇒ the OS Downloads folder (desktop)
-/// or the app documents folder (mobile). Shared with the player and the
-/// recordings library, so the pref key lives here.
+/// Output folder for recordings; null/empty ⇒ `Downloads/[recSubdirName]`
+/// (desktop) or the app documents folder (mobile). Shared with the player and
+/// the recordings library, so the pref key lives here.
 const recDirKey = 'rec_dir';
 
+/// Our own subfolder inside the shared user folder recordings land in (Downloads,
+/// or Documents when there's no Downloads). Recording straight into that folder
+/// made the library list (and offer to delete) every unrelated mp3 sitting there,
+/// so the default output is a folder the app owns.
+const recSubdirName = 'EZ-TuneIn';
+
+/// Where recordings go when [recDirKey] isn't set: `Downloads/[recSubdirName]` on
+/// desktop (`Documents/[recSubdirName]` if the platform can't report a Downloads
+/// folder), or the app documents folder on mobile. Public so the settings page can
+/// label the default with its real path instead of guessing.
+Future<Directory> defaultRecordingsDir() async {
+  if (isDesktop) {
+    // Downloads, or Documents when the platform can't report one. Both are
+    // shared user folders, so always land in our own subfolder — the library
+    // lists (and can delete) every audio file in whatever folder this returns.
+    final base = (await getDownloadsDirectory()) ??
+        await getApplicationDocumentsDirectory();
+    return Directory('${base.path}/$recSubdirName');
+  }
+  // Mobile: the app documents dir is app-private, so there's nothing unrelated
+  // in it and a subfolder would only orphan existing recordings.
+  return getApplicationDocumentsDirectory();
+}
+
 /// Folder recordings are written to: the user's chosen [recDirKey] if set,
-/// otherwise the Downloads folder on desktop, falling back to the app documents
-/// folder. Used by both the recorder and the recordings library view.
+/// otherwise [defaultRecordingsDir]. Used by both the recorder and the recordings
+/// library view. May not exist yet — the recorder creates it when it saves the
+/// first file.
 Future<Directory> recordingsDir() async {
   final prefs = await SharedPreferences.getInstance();
   final custom = prefs.getString(recDirKey);
   if (custom != null && custom.trim().isNotEmpty) return Directory(custom);
-  if (isDesktop) {
-    final dl = await getDownloadsDirectory();
-    if (dl != null) return dl;
-  }
-  return getApplicationDocumentsDirectory();
+  return defaultRecordingsDir();
 }
 
 /// Audio file extensions the recordings library will list and play.
