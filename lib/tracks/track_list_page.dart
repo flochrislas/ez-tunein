@@ -227,11 +227,11 @@ class _TrackListPageState extends State<TrackListPage>
         final int r;
         switch (columnIndex) {
           case 1:
-            r = a.stationLower.compareTo(b.stationLower);
-          case 2:
             r = a.artistLower.compareTo(b.artistLower);
-          case 3:
+          case 2:
             r = a.titleLower.compareTo(b.titleLower);
+          case 3:
+            r = a.stationLower.compareTo(b.stationLower);
           default:
             r = a.timestamp.compareTo(b.timestamp);
         }
@@ -355,11 +355,14 @@ class _TrackListPageState extends State<TrackListPage>
               sortColumnIndex: _sortColumn,
               sortAscending: _ascending,
               showCheckboxColumn: false,
+              // Artist/Title first — they're what the user scans for; the station
+              // is context, so it sits last. Column order must match _onSort's
+              // indices (and the phone sort menu's).
               columns: [
                 DataColumn(label: const Text('When'), onSort: _onSort),
-                DataColumn(label: const Text('Radio station'), onSort: _onSort),
                 DataColumn(label: const Text('Artist'), onSort: _onSort),
                 DataColumn(label: const Text('Title'), onSort: _onSort),
+                DataColumn(label: const Text('Radio station'), onSort: _onSort),
               ],
               rows: [
                 for (final t in rows)
@@ -367,9 +370,9 @@ class _TrackListPageState extends State<TrackListPage>
                     onSelectChanged: (_) => _copy(t),
                     cells: [
                       DataCell(Text(fmtDateTime(t.timestamp))),
-                      DataCell(Text(t.station)),
                       DataCell(Text(t.artist)),
                       DataCell(Text(t.title)),
+                      DataCell(Text(t.station)),
                     ],
                   ),
               ],
@@ -445,9 +448,9 @@ class _TrackListPageState extends State<TrackListPage>
                 itemBuilder: (_) => const [
                   PopupMenuItem(value: (0, false), child: Text('Newest first')),
                   PopupMenuItem(value: (0, true), child: Text('Oldest first')),
-                  PopupMenuItem(value: (2, true), child: Text('Artist A–Z')),
-                  PopupMenuItem(value: (3, true), child: Text('Title A–Z')),
-                  PopupMenuItem(value: (1, true), child: Text('Station A–Z')),
+                  PopupMenuItem(value: (1, true), child: Text('Artist A–Z')),
+                  PopupMenuItem(value: (2, true), child: Text('Title A–Z')),
+                  PopupMenuItem(value: (3, true), child: Text('Station A–Z')),
                 ],
               ),
             IconButton(
