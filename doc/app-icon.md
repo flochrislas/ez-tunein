@@ -15,9 +15,10 @@ Everything lives in `assets/icon/`:
 | File | Role | Edited by hand? |
 |---|---|---|
 | `icon.svg` | **Canonical** vector logo (180² viewBox) | Yes — this is the *only* source |
-| `icon.png` | 1024² flat master (Android legacy, macOS, Windows) | **Generated** |
-| `app_icon_256.png` | 256² flat icon (Linux GTK window/taskbar; also audio_service art) | **Generated** |
-| `icon_background.png` | Android adaptive background — the bare gradient | **Generated** |
+| `icon.png` | 1024² rounded tile (Windows, Android legacy) | **Generated** |
+| `app_icon_256.png` | 256² rounded tile (Linux GTK window/taskbar; also audio_service art) | **Generated** |
+| `icon_macos.png` | 1024² Apple-template tile — rounder **and** inset | **Generated** |
+| `icon_background.png` | Android adaptive background — the bare gradient, full-bleed square | **Generated** |
 | `icon_adaptive_foreground.png` | Android adaptive foreground — the logo alone, on transparency | **Generated** |
 
 Redesigning the icon means replacing `icon.svg` and re-running the two commands
@@ -78,13 +79,33 @@ those ids change, the script fails loudly with the offending id rather than
 silently emitting a black square — update the constants at the top of
 `make_icons.py` to match.
 
+## Corner shape — who owns it
+
+A hard square reads as dated on every platform where the **app** owns the icon's
+shape, which is all of them except Android:
+
+| Platform | Who shapes the icon | What we ship |
+|---|---|---|
+| Android | **The launcher** masks the adaptive layers (circle/squircle/teardrop, device-dependent) | Full-bleed squares — `icon_background.png` + `icon_adaptive_foreground.png`. **Never round these**; the mask would clip an already-rounded tile. |
+| GNOME / Linux | The app | `app_icon_256.png` — `CORNER_RADIUS` (12%), roughly Adwaita's own app tiles |
+| Windows | The app (no rounding convention) | `icon.png` — same 12% tile; harmless there and consistent with Linux |
+| macOS | The app; the Dock does **no** masking | `icon_macos.png` — Apple's template, see below |
+
+macOS is the strict one. Since Big Sur the convention isn't just "rounded": the
+tile is a squircle-ish rounded rect **inset** inside the canvas (~80%), which is
+what makes every Dock icon optically the same size. Full-bleed art sits visibly
+larger than its neighbours, so macOS gets its own asset — `pubspec.yaml` points
+`macos: image_path:` at it while `image_path:`/`windows:` keep the fuller tile.
+
 ## Tweaking the look
 
-Everything visual lives in `icon.svg` — edit it in Inkscape. The script has one
-sizing knob:
+Everything visual lives in `icon.svg` — edit it in Inkscape. The script's knobs:
 
 | Constant | Meaning |
 |---|---|
+| `CORNER_RADIUS` | Corner radius of `icon.png` / `app_icon_256.png`, as a fraction of the canvas (0.12). Raise for a more phone-like tile; 0 gives back the old hard square. |
+| `MACOS_RADIUS` | Corner radius of `icon_macos.png`, as a fraction of **the tile** (0.225) — so the curve is unaffected by `MACOS_INSET`. |
+| `MACOS_INSET` | Tile side as a share of the canvas (0.805), i.e. Apple's transparent margin. |
 | `FILL_ADAPTIVE` | Fraction of the adaptive-foreground image the logo is scaled to. Android shows only the central **72/108** (0.667) of an adaptive icon and treats **66/108** (0.611) as the safe zone — but `flutter_launcher_icons` additionally wraps the foreground in an `android:inset="16%"` (visible in the generated `mipmap-anydpi-v26/ic_launcher.xml`), shrinking it to 0.68. At `0.96` the arc tips land at ≈**0.64** of the icon canvas: inside every launcher mask, a hair outside the safe zone (which only governs parallax during launcher animations). |
 
 ## Previewing before committing
@@ -97,7 +118,7 @@ the repo (e.g. `~/icon_preview.png`) so it isn't committed.
 
 ## Committing
 
-Commit `assets/icon/icon.svg`, the four generated `assets/icon/*.png`, **and**
+Commit `assets/icon/icon.svg`, the five generated `assets/icon/*.png`, **and**
 the regenerated platform icons under `android/`, `macos/`, `windows/`. The Linux
 binary picks up `app_icon_256.png` at build time, so nothing extra to commit
 there. See [`releasing.md`](./releasing.md) for shipping a new version.

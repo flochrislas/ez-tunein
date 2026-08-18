@@ -57,8 +57,10 @@ flutter_launcher_icons:
   adaptive_icon_background: "assets/icon/icon_background.png"
   adaptive_icon_foreground: "assets/icon/icon_adaptive_foreground.png"
   macos:
+    # macOS does no masking and expects Apple's inset squircle, so it gets its
+    # own tile rather than the fuller-bleed one the other platforms use.
     generate: true
-    image_path: "assets/icon/icon.png"
+    image_path: "assets/icon/icon_macos.png"
   windows:
     generate: true
     image_path: "assets/icon/icon.png"
