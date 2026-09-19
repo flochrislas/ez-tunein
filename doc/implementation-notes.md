@@ -95,6 +95,11 @@ Lifecycle hardening (added after a code review):
   `_play` with a `_playSession` id that its closures check, and `IcyReader`
   bumps an internal `_generation` on every `start`/`stop` so a superseded
   connection — and any pending reconnect timer — is inert.
+- **Same-station tap guard.** Re-tapping the station that is already current
+  is a no-op while it's loading/playing (an impatient double-click used to
+  restart the whole session and *delay* the music), resumes it if paused, and
+  only re-tunes after a stream error. Pure `sameStationTapAction` in
+  `radio_session.dart`, called first thing in `RadioSession.play`; unit-tested.
 - **Status, not one message.** `MetadataStatus`
   (idle/connecting/waitingForFirstTitle/unsupported/failed/active) is reported via
   `onStatus`. The now-playing box (`_nowPlayingText`) distinguishes "still

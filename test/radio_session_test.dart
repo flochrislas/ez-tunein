@@ -63,6 +63,48 @@ void main() {
     });
   });
 
+  group('sameStationTapAction', () {
+    test('a different (or no) station always retunes', () {
+      expect(
+        sameStationTapAction(
+            currentUrl: null,
+            tappedUrl: 'a',
+            paused: false,
+            streamError: false),
+        TapAction.retune,
+      );
+      expect(
+        sameStationTapAction(
+            currentUrl: 'b', tappedUrl: 'a', paused: false, streamError: false),
+        TapAction.retune,
+      );
+    });
+
+    test('the current station, loading or playing, is ignored', () {
+      expect(
+        sameStationTapAction(
+            currentUrl: 'a', tappedUrl: 'a', paused: false, streamError: false),
+        TapAction.ignore,
+      );
+    });
+
+    test('the current station, paused, resumes', () {
+      expect(
+        sameStationTapAction(
+            currentUrl: 'a', tappedUrl: 'a', paused: true, streamError: false),
+        TapAction.resume,
+      );
+    });
+
+    test('the current station, after a stream error, retunes', () {
+      expect(
+        sameStationTapAction(
+            currentUrl: 'a', tappedUrl: 'a', paused: false, streamError: true),
+        TapAction.retune,
+      );
+    });
+  });
+
   group('canRecordNow', () {
     test('needs buffering on', () {
       expect(

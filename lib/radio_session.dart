@@ -65,6 +65,25 @@ String nowPlayingLine({
   return metaStatusMessage(metaStatus);
 }
 
+/// What a tap on a station tile should do given the current session state.
+enum TapAction { ignore, resume, retune }
+
+/// Guards against impatient double/triple taps on the station that is already
+/// current: re-running [RadioSession.play] would bump the session, drop the
+/// metadata reader, finalize any recording and re-tune — i.e. *delay* the
+/// music. So the same station is ignored while loading/playing, resumed if
+/// paused, and only re-tuned after a stream error (matching the "tap the
+/// station to reconnect" hint). Any other station always re-tunes.
+TapAction sameStationTapAction({
+  required String? currentUrl,
+  required String tappedUrl,
+  required bool paused,
+  required bool streamError,
+}) {
+  if (currentUrl != tappedUrl || streamError) return TapAction.retune;
+  return paused ? TapAction.resume : TapAction.ignore;
+}
+
 /// Whether recording can be *started* now: buffering on, a station playing, and
 /// either a fresh live title (auto mode) or a title-less station we're streaming
 /// raw (manual mode).
@@ -258,6 +277,19 @@ class RadioSession extends ChangeNotifier implements AudioModeDriver {
   }
 
   Future<void> play(Station station) async {
+    switch (sameStationTapAction(
+      currentUrl: _current?.url,
+      tappedUrl: station.url,
+      paused: _paused,
+      streamError: _streamError,
+    )) {
+      case TapAction.ignore:
+        return; // already on it (loading or playing): don't restart
+      case TapAction.resume:
+        return _resumeRadio();
+      case TapAction.retune:
+        break;
+    }
     // A new session: any late work from the previous station (a fast switch)
     // checks this id and bails before touching state / history / recording.
     final session = ++_playSession;
