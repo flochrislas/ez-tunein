@@ -172,4 +172,26 @@ void main() {
       ]);
     });
   });
+
+  group('capCsvRows', () {
+    const header = 'timestamp,station,artist,title,album,raw\n';
+
+    test('null when within the cap (no rewrite needed)', () {
+      expect(capCsvRows('${header}1,a,b,c,,d\n2,a,b,c,,d\n', 2), isNull);
+      expect(capCsvRows(header, 0), isNull);
+      expect(capCsvRows('', 5), isNull);
+    });
+
+    test('keeps the header and only the newest rows', () {
+      final out =
+          capCsvRows('${header}1,s,a,t,,r\n2,s,a,t,,r\n3,s,a,t,,r\n', 2);
+      expect(out, '${header}2,s,a,t,,r\n3,s,a,t,,r\n');
+    });
+
+    test('round-trips quoted fields intact', () {
+      final out = capCsvRows(
+          '${header}1,s,a,t,,r\n2,"Soma, FM","Prince","A ""B""",,r\n', 1);
+      expect(out, '${header}2,"Soma, FM",Prince,"A ""B""",,r\n');
+    });
+  });
 }

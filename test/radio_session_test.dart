@@ -105,6 +105,85 @@ void main() {
     });
   });
 
+  group('TrackChangeDedup', () {
+    test('first title of a session is "first", repeats are ignored', () {
+      final d = TrackChangeDedup();
+      expect(d.next('A - B'), TrackChangeKind.first);
+      expect(d.next('A - B'), TrackChangeKind.repeat);
+      expect(d.next('A - B'), TrackChangeKind.repeat);
+    });
+
+    test('a different title is a change', () {
+      final d = TrackChangeDedup();
+      d.next('A - B');
+      expect(d.next('C - D'), TrackChangeKind.changed);
+      expect(d.next('C - D'), TrackChangeKind.repeat);
+    });
+
+    test('reset makes the next title "first" again (new session)', () {
+      final d = TrackChangeDedup();
+      d.next('A - B');
+      d.reset();
+      expect(d.next('A - B'), TrackChangeKind.first);
+    });
+  });
+
+  group('HistoryDedup', () {
+    test('logs each distinct title once', () {
+      final d = HistoryDedup();
+      expect(d.shouldLog('A - B', enabled: true), isTrue);
+      expect(d.shouldLog('A - B', enabled: true), isFalse);
+      expect(d.shouldLog('C - D', enabled: true), isTrue);
+    });
+
+    test('never logs an empty title', () {
+      expect(HistoryDedup().shouldLog('', enabled: true), isFalse);
+    });
+
+    test('re-enabling logging mid-song still logs the current track', () {
+      final d = HistoryDedup();
+      expect(d.shouldLog('A - B', enabled: false), isFalse);
+      expect(d.shouldLog('A - B', enabled: true), isTrue);
+    });
+
+    test('reset lets the same title log again (new session)', () {
+      final d = HistoryDedup();
+      d.shouldLog('A - B', enabled: true);
+      d.reset();
+      expect(d.shouldLog('A - B', enabled: true), isTrue);
+    });
+  });
+
+  group('historyCsvRow', () {
+    test('timestamp,station,artist,title,album,raw — quoted where needed', () {
+      final row = historyCsvRow(
+        now: DateTime(2026, 9, 19, 14, 5, 6),
+        station: 'Soma, FM',
+        rawTitle: 'Daft Punk - Aerodynamic',
+      );
+      expect(row,
+          '2026-09-19T14:05:06.000,"Soma, FM",Daft Punk,Aerodynamic,,Daft Punk - Aerodynamic');
+    });
+  });
+
+  group('finalizeMessage', () {
+    test('null when nothing was armed', () {
+      expect(finalizeMessage((path: null, error: null)), isNull);
+    });
+
+    test('names the saved file', () {
+      expect(
+          finalizeMessage(
+              (path: '/x/y/Daft Punk - Aerodynamic.mp3', error: null)),
+          'Saved recording: Daft Punk - Aerodynamic.mp3');
+    });
+
+    test('surfaces the error', () {
+      expect(finalizeMessage((path: null, error: 'disk full')),
+          'Recording failed: disk full');
+    });
+  });
+
   group('canRecordNow', () {
     test('needs buffering on', () {
       expect(

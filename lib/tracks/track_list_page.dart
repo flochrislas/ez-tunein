@@ -181,19 +181,7 @@ class _TrackListPageState extends State<TrackListPage>
   /// track list/order changes (via [_recomputeVisible]).
   List<SavedTrack> _visible = [];
 
-  void _recomputeVisible() {
-    if (query.isEmpty) {
-      _visible = _tracks;
-      return;
-    }
-    final q = query.toLowerCase();
-    _visible = _tracks
-        .where((t) =>
-            t.artistLower.contains(q) ||
-            t.titleLower.contains(q) ||
-            t.stationLower.contains(q))
-        .toList();
-  }
+  void _recomputeVisible() => _visible = filterTracks(_tracks, query);
 
   Widget _searchBar() {
     return Padding(
@@ -223,20 +211,8 @@ class _TrackListPageState extends State<TrackListPage>
     setState(() {
       _sortColumn = columnIndex;
       _ascending = ascending;
-      _tracks.sort((a, b) {
-        final int r;
-        switch (columnIndex) {
-          case 1:
-            r = a.artistLower.compareTo(b.artistLower);
-          case 2:
-            r = a.titleLower.compareTo(b.titleLower);
-          case 3:
-            r = a.stationLower.compareTo(b.stationLower);
-          default:
-            r = a.timestamp.compareTo(b.timestamp);
-        }
-        return ascending ? r : -r;
-      });
+      sortTracks(_tracks, TrackSortKey.values[columnIndex],
+          ascending: ascending);
       _recomputeVisible();
       _resetWindow();
     });

@@ -100,6 +100,19 @@ Lifecycle hardening (added after a code review):
   restart the whole session and *delay* the music), resumes it if paused, and
   only re-tunes after a stream error. Pure `sameStationTapAction` in
   `radio_session.dart`, called first thing in `RadioSession.play`; unit-tested.
+- **Testable session rules.** The per-session dedup markers are small pure
+  classes in `radio_session.dart` — `TrackChangeDedup` (repeat / first / changed,
+  so the first title of a session never finalizes) and `HistoryDedup` (leaves its
+  marker untouched while logging is off, so re-enabling mid-song logs the current
+  track) — plus `historyCsvRow` and `finalizeMessage` (the one "Saved recording /
+  Recording failed" snack builder). All unit-tested in `test/radio_session_test.dart`.
+  `test/audio_handler_test.dart` pins the `EzAudioHandler` handoff race (a late
+  `detach` from a superseded driver is ignored) with fake drivers, and
+  `test/default_stations_test.dart` asserts the seed list mirrors
+  `radios-selection.csv` exactly, so the two can't drift. The track-list
+  sort/filter (`sortTracks` / `filterTracks` + `TrackSortKey`, whose enum order
+  is the table's column order) live in `models/saved_track.dart`, tested in
+  `test/saved_track_test.dart`; `isAudioFile` and `capCsvRows` are tested too.
 - **Status, not one message.** `MetadataStatus`
   (idle/connecting/waitingForFirstTitle/unsupported/failed/active) is reported via
   `onStatus`. The now-playing box (`_nowPlayingText`) distinguishes "still

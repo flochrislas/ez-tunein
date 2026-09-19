@@ -84,6 +84,68 @@ TapAction sameStationTapAction({
   return paused ? TapAction.resume : TapAction.ignore;
 }
 
+/// Outcome of a title tick for the recorder: the ICY reader re-emits the same
+/// title every icy-metaint bytes, so most ticks are [repeat]; the [first] title
+/// of a session must NOT finalize (the buffer was reset at play, and cutting it
+/// would drop the initial song); only a real [changed] title ends a recording.
+enum TrackChangeKind { repeat, first, changed }
+
+/// Session-scoped dedup for [RadioSession._handleTrackChange]. Reset on every
+/// play/stop so the next station's opening title counts as [TrackChangeKind.first].
+class TrackChangeDedup {
+  String _last = '';
+
+  void reset() => _last = '';
+
+  TrackChangeKind next(String title) {
+    if (title == _last) return TrackChangeKind.repeat;
+    final first = _last.isEmpty;
+    _last = title;
+    return first ? TrackChangeKind.first : TrackChangeKind.changed;
+  }
+}
+
+/// Session-scoped dedup for the play-history log. When logging is disabled the
+/// marker is deliberately left untouched, so re-enabling mid-song still logs the
+/// song that is currently playing.
+class HistoryDedup {
+  String _last = '';
+
+  void reset() => _last = '';
+
+  bool shouldLog(String rawTitle, {required bool enabled}) {
+    if (rawTitle.isEmpty || rawTitle == _last || !enabled) return false;
+    _last = rawTitle;
+    return true;
+  }
+}
+
+/// One play-history CSV row (no trailing newline), same columns as the
+/// saved-tracks file: `timestamp,station,artist,title,album,raw`.
+String historyCsvRow({
+  required DateTime now,
+  required String station,
+  required String rawTitle,
+}) {
+  final parts = splitArtistTitle(rawTitle);
+  return [
+    now.toIso8601String(),
+    station,
+    parts.artist,
+    parts.title,
+    '', // album (not available from ICY)
+    rawTitle, // raw, as a fallback
+  ].map(csvField).join(',');
+}
+
+/// The snack for a recorder finalize: saved ⇒ file name, failed ⇒ the error,
+/// nothing armed ⇒ null (so callers can also read "did a recording end?").
+String? finalizeMessage(FinalizeResult result) {
+  if (result.path != null) return 'Saved recording: ${baseName(result.path!)}';
+  if (result.error != null) return 'Recording failed: ${result.error}';
+  return null;
+}
+
 /// Whether recording can be *started* now: buffering on, a station playing, and
 /// either a fresh live title (auto mode) or a title-less station we're streaming
 /// raw (manual mode).
@@ -152,13 +214,13 @@ class RadioSession extends ChangeNotifier implements AudioModeDriver {
   int _playSession = 0;
   double _volume = 1.0;
   bool _muted = false;
-  String _lastHistoryTitle = '';
+  final _history = HistoryDedup();
   bool _recording = false;
   bool _manualRecording = false;
   bool _arming = false; // an arm() call is awaiting the recorder op queue (C2)
   bool _recBuffering = true;
   int _recLeadSeconds = recLeadSecondsDefault;
-  String _lastRecTitle = '';
+  final _trackChange = TrackChangeDedup();
 
   /// One-shot user messages (snackbars). Set by the widget.
   void Function(String message)? onMessage;
@@ -258,11 +320,8 @@ class RadioSession extends ChangeNotifier implements AudioModeDriver {
         _manualRecording = false;
         _notify();
         _publishRadio(); // clear "recording" from the card
-        if (result.path != null) {
-          onMessage?.call('Saved recording: ${baseName(result.path!)}');
-        } else if (result.error != null) {
-          onMessage?.call('Recording failed: ${result.error}');
-        }
+        final msg = finalizeMessage(result);
+        if (msg != null) onMessage?.call(msg);
       }
       // A title-less station only streams its (second) audio connection when
       // buffering is on, so restart the reader to match the new flag. Also cover
@@ -300,8 +359,8 @@ class RadioSession extends ChangeNotifier implements AudioModeDriver {
     _nowPlaying = '';
     _trackInfoFresh = false;
     _metaStatus = MetadataStatus.connecting;
-    _lastHistoryTitle = ''; // new session: let the first song log even if same
-    _lastRecTitle = ''; // reset the recorder's track-change dedup
+    _history.reset();
+    _trackChange.reset();
     _recording = false;
     _manualRecording = false;
     _notify();
@@ -313,11 +372,8 @@ class RadioSession extends ChangeNotifier implements AudioModeDriver {
     // stops recording) — finalize it before we retune.
     final result = await _recorder.onStreamStopped();
     if (session != _playSession) return; // superseded while finalizing
-    if (result.path != null) {
-      onMessage?.call('Saved recording: ${baseName(result.path!)}');
-    } else if (result.error != null) {
-      onMessage?.call('Recording failed: ${result.error}');
-    }
+    final msg = finalizeMessage(result);
+    if (msg != null) onMessage?.call(msg);
     try {
       await _player.setUrl(station.url);
       // Don't await play(): for an endless radio stream just_audio's play()
@@ -334,8 +390,8 @@ class RadioSession extends ChangeNotifier implements AudioModeDriver {
       _nowPlaying = '';
       _trackInfoFresh = false;
       _metaStatus = MetadataStatus.idle;
-      _lastHistoryTitle = '';
-      _lastRecTitle = '';
+      _history.reset();
+      _trackChange.reset();
       _recording = false;
       _manualRecording = false;
       _notify();
@@ -438,8 +494,8 @@ class RadioSession extends ChangeNotifier implements AudioModeDriver {
     _nowPlaying = '';
     _trackInfoFresh = false;
     _metaStatus = MetadataStatus.idle;
-    _lastHistoryTitle = '';
-    _lastRecTitle = '';
+    _history.reset();
+    _trackChange.reset();
     _recording = false;
     _manualRecording = false;
     _muted = false;
@@ -447,11 +503,8 @@ class RadioSession extends ChangeNotifier implements AudioModeDriver {
     _notify();
     // Nothing playing now ⇒ tear the media session down.
     audioHandler.detach(this);
-    if (result.path != null) {
-      onMessage?.call('Saved recording: ${baseName(result.path!)}');
-    } else if (result.error != null) {
-      onMessage?.call('Recording failed: ${result.error}');
-    }
+    final msg = finalizeMessage(result);
+    if (msg != null) onMessage?.call(msg);
   }
 
   /// Non-destructive pause for live radio, from the media session / Bluetooth /
@@ -488,28 +541,28 @@ class RadioSession extends ChangeNotifier implements AudioModeDriver {
     onMessage?.call('Stream lost — tap the station to reconnect.');
   }
 
-  /// React to a genuine track change (the ICY reader re-emits the same title each
-  /// tick, so we dedup on [_lastRecTitle]). The very first title of a session is
-  /// the initial track — the buffer is already running from [play], so we don't
-  /// reset it; only a real change finalizes an armed recording and clears it.
+  /// React to a title tick: most are repeats (see [TrackChangeDedup]); the first
+  /// title of a session only refreshes the media card; a real change finalizes
+  /// any armed recording.
   Future<void> _handleTrackChange(String title) async {
-    if (title == _lastRecTitle) return;
-    final isFirst = _lastRecTitle.isEmpty;
-    _lastRecTitle = title;
-    if (isFirst) {
-      _publishRadio(); // reflect the first real title in the media card
-      return;
+    switch (_trackChange.next(title)) {
+      case TrackChangeKind.repeat:
+        return;
+      case TrackChangeKind.first:
+        _publishRadio(); // reflect the first real title in the media card
+        return;
+      case TrackChangeKind.changed:
+        break;
     }
     final result = await _recorder.onTrackChanged();
     // A finished (path) or failed (error) recording both end the recording
     // state — clear the red glow either way, else it persists indefinitely.
-    if (result.path != null || result.error != null) {
+    final msg = finalizeMessage(result);
+    if (msg != null) {
       _recording = false;
       _manualRecording = false;
       _notify();
-      onMessage?.call(result.path != null
-          ? 'Saved recording: ${baseName(result.path!)}'
-          : 'Recording failed: ${result.error}');
+      onMessage?.call(msg);
     }
     _publishRadio(); // refresh the card for the new track / cleared state
   }
@@ -579,13 +632,7 @@ class RadioSession extends ChangeNotifier implements AudioModeDriver {
     _manualRecording = false;
     _notify();
     _publishRadio();
-    if (result.path != null) {
-      onMessage?.call('Saved recording: ${baseName(result.path!)}');
-    } else if (result.error != null) {
-      onMessage?.call('Recording failed: ${result.error}');
-    } else {
-      onMessage?.call('Nothing recorded yet.');
-    }
+    onMessage?.call(finalizeMessage(result) ?? 'Nothing recorded yet.');
   }
 
   /// Save the currently-playing title to the saved-tracks CSV.
@@ -623,22 +670,16 @@ class RadioSession extends ChangeNotifier implements AudioModeDriver {
   /// the dedup). Best-effort, like metadata.
   Future<void> _recordHistory(String rawTitle) async {
     final station = _current;
-    if (station == null || rawTitle.isEmpty || rawTitle == _lastHistoryTitle) {
-      return;
-    }
-    // Logging can be turned off from the History view. Bail before updating
-    // _lastHistoryTitle so re-enabling mid-song still logs the current track.
-    if (!(_prefs?.getBool(historyLoggingKey) ?? true)) return;
-    _lastHistoryTitle = rawTitle;
-    final parts = splitArtistTitle(rawTitle);
-    final row = [
-      DateTime.now().toIso8601String(),
-      station.name,
-      parts.artist,
-      parts.title,
-      '', // album (not available from ICY)
-      rawTitle, // raw, as a fallback
-    ].map(csvField).join(',');
+    if (station == null) return;
+    // Logging can be turned off from the History view; the dedup leaves its
+    // marker untouched in that case so re-enabling mid-song logs this track.
+    final enabled = _prefs?.getBool(historyLoggingKey) ?? true;
+    if (!_history.shouldLog(rawTitle, enabled: enabled)) return;
+    final row = historyCsvRow(
+      now: DateTime.now(),
+      station: station.name,
+      rawTitle: rawTitle,
+    );
     try {
       final file = await historyFile();
       if (!await file.exists()) {
