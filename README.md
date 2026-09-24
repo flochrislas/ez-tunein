@@ -289,6 +289,10 @@ URL isn't already in your list and skips the rest. On Linux the file picker need
   Windows build and the SmartScreen warning.
 - [`doc/releasing.md`](doc/releasing.md) — how to cut a release (version bump,
   tag, the GitHub Actions build, publish).
+- [`doc/play-store-declarations.md`](doc/play-store-declarations.md) — the Google
+  Play policy declarations (foreground service, privacy policy, data safety).
+- [`PRIVACY.md`](PRIVACY.md) — the privacy policy (no data collection; what the
+  app sends over the network and why).
 
 ## License
 

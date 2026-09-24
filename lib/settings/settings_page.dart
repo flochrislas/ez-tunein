@@ -10,6 +10,10 @@ import 'color_swatch.dart';
 
 /// The GitHub Releases page — where newer builds are published.
 const _releasesUrl = 'https://github.com/flochrislas/ez-tunein/releases';
+// Google Play requires the privacy policy to be reachable from inside the app,
+// not just on the store listing. Rendered by GitHub; see PRIVACY.md.
+const _privacyUrl =
+    'https://github.com/flochrislas/ez-tunein/blob/main/PRIVACY.md';
 
 /// Settings for the song recorder: buffering on/off, buffer size, and where
 /// recordings are saved. Persists straight to shared_preferences (the player
@@ -57,14 +61,14 @@ class _SettingsPageState extends State<SettingsPage> {
     });
   }
 
-  /// Open the GitHub Releases page in the browser (best-effort).
-  Future<void> _openReleases() async {
+  /// Open [url] in the system browser (best-effort).
+  Future<void> _openUrl(String url) async {
     // launchUrl returns false (rather than throwing) on several platforms when
     // it can't launch, so check the bool too — not just catch.
     var ok = false;
     try {
-      ok = await launchUrl(Uri.parse(_releasesUrl),
-          mode: LaunchMode.externalApplication);
+      ok =
+          await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
     } catch (_) {
       ok = false;
     }
@@ -384,10 +388,20 @@ class _SettingsPageState extends State<SettingsPage> {
             style: TextStyle(color: muted),
           ),
           const SizedBox(height: 4),
-          TextButton.icon(
-            onPressed: _openReleases,
-            icon: const Icon(Icons.open_in_new, size: 18),
-            label: const Text('Releases on GitHub'),
+          Wrap(
+            alignment: WrapAlignment.center,
+            children: [
+              TextButton.icon(
+                onPressed: () => _openUrl(_releasesUrl),
+                icon: const Icon(Icons.open_in_new, size: 18),
+                label: const Text('Releases on GitHub'),
+              ),
+              TextButton.icon(
+                onPressed: () => _openUrl(_privacyUrl),
+                icon: const Icon(Icons.privacy_tip_outlined, size: 18),
+                label: const Text('Privacy policy'),
+              ),
+            ],
           ),
         ],
       ),
