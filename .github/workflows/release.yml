@@ -4,7 +4,8 @@
 #   git tag v0.1.0 && git push origin v0.1.0
 #
 # Produces (attached to a DRAFT release for you to review, then publish):
-#   - ez-tunein-<tag>-android.apk        (signed, see secrets below)
+#   - ez-tunein-<tag>-android.apk        (signed, see secrets below — sideload)
+#   - ez-tunein-<tag>-android.aab        (same key; the Play Console upload format)
 #   - ez-tunein-<tag>-linux-x64.tar.gz   (needs libmpv on the user's machine)
 #   - ez-tunein-<tag>-windows-x64.zip    (unsigned — see doc/windows-signing.md)
 #   - ez-tunein-<tag>-macos.dmg          (unsigned, ad-hoc signed — right-click → Open)
@@ -88,36 +89,56 @@ jobs:
           EOF
 
       - run: flutter pub get
+      # Two deliverables from one signing config: the APK for sideloading from
+      # GitHub Releases, and the app bundle Google Play requires for uploads.
       - run: flutter build apk --release
+      - run: flutter build appbundle --release
 
-      - name: Verify it's signed with the expected upload key (not debug)
+      - name: Verify both are signed with the expected upload key (not debug)
         env:
           # Public SHA-256 of android/upload key (CN=EZ-TuneIn) — fingerprints
           # aren't secret. Update this if the upload key is ever rotated (S6).
           EXPECTED_SHA256: '22:15:D5:B0:25:63:E4:58:54:7B:88:10:87:58:D2:0E:72:B7:53:0D:CC:87:31:4E:D0:77:92:AF:E8:2D:E9:3C'
         run: |
+          want=$(printf '%s' "$EXPECTED_SHA256" | tr -d ':' | tr 'A-F' 'a-f')
+
+          # APK: apksigner prints the SHA-256 as lowercase hex, no colons.
+          # Normalise the expected value the same way and require an exact match
+          # — grepping the DN alone would also pass the debug fallback key.
           APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -1)
           CERTS=$("$APKSIGNER" verify --print-certs build/app/outputs/flutter-apk/app-release.apk)
           echo "$CERTS"
-          # apksigner prints the SHA-256 as lowercase hex, no colons. Normalise
-          # the expected value the same way and require an exact match — grepping
-          # the DN alone would also pass the debug fallback key.
           got=$(printf '%s\n' "$CERTS" | grep -i 'SHA-256 digest' | grep -oiE '[0-9a-f]{64}' | head -1)
-          want=$(printf '%s' "$EXPECTED_SHA256" | tr -d ':' | tr 'A-F' 'a-f')
           if [ "$got" != "$want" ]; then
             echo "::error::APK signing cert SHA-256 ($got) != expected upload key ($want). Refusing to publish."
             exit 1
           fi
-          echo "Signing cert matches the expected upload key."
 
-      - name: Name the artifact
+          # AAB: a bundle is a jarsigner-signed zip (no APK Signature Scheme), so
+          # apksigner can't read it; keytool prints the signer cert instead, with
+          # a colon-separated uppercase SHA256 fingerprint.
+          BUNDLE=build/app/outputs/bundle/release/app-release.aab
+          AABCERT=$(keytool -printcert -jarfile "$BUNDLE")
+          echo "$AABCERT"
+          got=$(printf '%s\n' "$AABCERT" | grep -i 'SHA256:' | head -1 | grep -oiE '([0-9a-f]{2}:){31}[0-9a-f]{2}' | tr -d ':' | tr 'A-F' 'a-f')
+          if [ "$got" != "$want" ]; then
+            echo "::error::AAB signing cert SHA-256 ($got) != expected upload key ($want). Refusing to publish."
+            exit 1
+          fi
+          echo "Both the APK and the AAB are signed with the expected upload key."
+
+      - name: Name the artifacts
         env:
           TAG: ${{ github.ref_name }}   # via env so the tag can't inject shell (S5)
-        run: cp build/app/outputs/flutter-apk/app-release.apk "ez-tunein-$TAG-android.apk"
+        run: |
+          cp build/app/outputs/flutter-apk/app-release.apk "ez-tunein-$TAG-android.apk"
+          cp build/app/outputs/bundle/release/app-release.aab "ez-tunein-$TAG-android.aab"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: android
-          path: ez-tunein-*-android.apk
+          path: |
+            ez-tunein-*-android.apk
+            ez-tunein-*-android.aab
           if-no-files-found: error
 
   # ------------------------------------------------------------------ Linux
@@ -267,7 +288,8 @@ jobs:
             ## EZ-TuneIn ${{ github.ref_name }}
 
             Downloads:
-            - **Android** — `*-android.apk` (sideload; enable "install unknown apps")
+            - **Android** — `*-android.apk` (sideload; enable "install unknown apps").
+              The `*-android.aab` is the Google Play upload bundle — it can't be installed directly.
             - **Windows** — `*-windows-x64.zip` (unzip, run `ez_tunein.exe`).
               Windows may warn with "Unknown Publisher" — click **More info → Run anyway**.
             - **Linux** — `*-linux-x64.tar.gz` (extract, run `./ez-tunein-linux-x64/ez_tunein`).

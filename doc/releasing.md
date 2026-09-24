@@ -4,11 +4,12 @@ How to cut a new **EZ-TuneIn Radio** release. Releases are built and published b
 GitHub Actions ([`.github/workflows/release.yml`](../.github/workflows/release.yml))
 when you push a `v*` tag — you don't build the artifacts by hand.
 
-Each release attaches four deliverables to a GitHub Release:
+Each release attaches five deliverables to a GitHub Release:
 
 | Platform | Asset | Notes |
 |---|---|---|
 | Android | `ez-tunein-<tag>-android.apk` | signed with the upload key; sideload |
+| Android (Play) | `ez-tunein-<tag>-android.aab` | same key; upload this to Play Console — not installable by hand |
 | Linux | `ez-tunein-<tag>-linux-x64.tar.gz` | needs `libmpv` on the user's machine |
 | Windows | `ez-tunein-<tag>-windows-x64.zip` | unsigned — SmartScreen warns (see [`windows-signing.md`](./windows-signing.md)) |
 | macOS | `ez-tunein-<tag>-macos.dmg` | unsigned/ad-hoc — Gatekeeper warns, right-click → Open (see below) |
