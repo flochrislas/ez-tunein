@@ -80,13 +80,46 @@ connection, Radio Browser searches, and user-tapped links. If a feature is ever
 added that phones home (update check, analytics, crash reporting), update
 `PRIVACY.md` *in the same change*, and revisit the Data safety form (below).
 
-## 3. Still to do (not covered here)
+## 3. Data safety form
 
-- **Data safety form** (App content → Data safety). Current honest answers:
-  no data collected, no data shared. The Radio Browser search keyword is sent
-  off-device but is not tied to the user and is not stored by the app; declaring
-  "no collection" is the standard interpretation for an ephemeral request, but
-  read the form's definitions when filling it in.
+**Where.** Play Console → **App content** → **Data safety**.
+
+**The only candidate.** Nothing the app stores (settings, station list, saved
+tracks, history, recordings) ever leaves the device, so none of it appears on
+the form. The one thing that does go off-device is the **station search
+keyword**, sent to the Radio Browser API to fulfil the search. Strictly it
+qualifies for Google's *ephemeral processing* exemption (used only to service
+the request in real time, never stored), which would allow leaving it out.
+**We declare it anyway**: Google is strict about under-declaring and never about
+over-declaring, the form has a data type that matches it exactly, and it keeps
+the form consistent with `PRIVACY.md`, which already discloses it.
+
+| Question | Answer |
+|---|---|
+| Does your app collect or share any of the required user data types? | Yes |
+| Encrypted in transit? | Yes (the API is called over HTTPS) |
+| Do you provide a way to request deletion? | No — nothing is stored, so there is nothing to delete |
+| Data type | App activity → **In-app search history** |
+| Collected? | Yes |
+| Shared? | No (Radio Browser acts as a service provider fulfilling the request, which is exempt from "sharing") |
+| Processed ephemerally? | Yes |
+| Required or optional? | Optional (users can add stations manually and never search) |
+| Purpose | App functionality |
+| Linked to the user's identity? | No |
+| Used for tracking? | No |
+
+Every other data type: **not collected**.
+
+**What *not* to declare.** The IP address on any connection is inherent
+network metadata, not app-collected data. Stream URLs sent to radio servers
+are the content the user asked for, not personal data. The `User-Agent`
+string (`ez_tunein/<version>`) identifies the app, not the user.
+
+**Keep it in sync.** If a feature ever sends anything else off-device, add the
+data type here and in `PRIVACY.md` in the same change.
+
+## 4. Still to do (not covered here)
+
 - **App bundle.** Play accepts `.aab` only. The release workflow now builds
   one next to the APK (`ez-tunein-<tag>-android.aab`, signed with the same
   upload key and fingerprint-checked in CI); download it from the draft release
